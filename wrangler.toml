@@ -9,15 +9,15 @@ compatibility_date = "2026-09-22"
 command = "cargo install -q --locked worker-build@0.8.6 && worker-build --release"
 
 [vars]
-# Comma-separated CIDR ranges (v4 and/or v6) allowed to reach /adv and /rec
-# -- the VPS(es) this Tang instance actually serves, and the sole access
+# Comma-separated CIDR ranges (v4 and/or v6) allowed to reach /adv and /rec:
+# the VPS(es) this Tang instance actually serves, and the sole access
 # control (Clevis, the client, sends no header beyond Content-Type and has
 # no config option to add one, so there's no bearer credential to check
 # alongside this). Keep this as tight as the real network topology allows
 # (a bare /32 or /128) unless there's a concrete reason to widen it.
 ALLOWED_CIDRS = "203.0.113.4/32"
 
-# Secret (never set here -- `wrangler secret put TANG_KEYS`):
-#   TANG_KEYS  {"sig": {...JWK...}, "exc": {...JWK...}} -- the same JSON
+# Secret, never set here; set with `wrangler secret put TANG_KEYS` instead:
+#   TANG_KEYS  {"sig": {...JWK...}, "exc": {...JWK...}}, the same JSON
 #              shape as the password-manager backup, so this is a direct
 #              paste with nothing to split by hand

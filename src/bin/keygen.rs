@@ -2,8 +2,8 @@
 //
 // Generates a fresh Tang key set and prints it as the combined JSON the
 // Worker's `TANG_KEYS` secret and the password-manager backup both expect.
-// Run natively (not part of the Worker's wasm32 build) -- once for initial
-// setup, and again as a full replacement (not a merge) for key rotation.
+// Run natively (not part of the Worker's wasm32 build), once for initial
+// setup and again as a full replacement (not a merge) for key rotation.
 //
 // Usage:
 //   cargo run --release --bin keygen > tang-keys.json

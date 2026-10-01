@@ -6,10 +6,10 @@
 //
 // Tang (Network-Bound Disk Encryption) server, deployed as a Cloudflare
 // Worker. Serves the two stateless Tang endpoints (`/adv`, `/rec/<kid>`),
-// with the actual protocol implemented by `tangy-lib`. Unlike a normal Tang
-// deployment -- which answers any caller -- this one is gated to a single
-// consumer (one VPS) by source IP, since the whole point here is limiting
-// who can complete a recovery, not serving the public. There's no bearer
+// with the actual protocol implemented by `tangy-lib`. A normal Tang
+// deployment answers any caller; this one is gated to a single consumer
+// (one VPS) by source IP, since the whole point here is limiting who can
+// complete a recovery, not serving the public. There's no bearer
 // credential on top of the IP check: the client is Clevis, which sends no
 // header beyond `Content-Type` and has no config option to add one.
 
@@ -43,9 +43,9 @@ fn get_client_ip(req: &Request) -> Option<String> { req.headers().get(header_nam
 
 /// Parses a comma-separated CIDR list from a wrangler var. An entry that
 /// fails to parse is dropped rather than failing the whole request, so one
-/// typo in `ALLOWED_CIDRS` doesn't take the Worker down -- but an empty
-/// result still fails every request closed, since `ip_allowed` treats "no
-/// ranges" as "nothing matches".
+/// typo in `ALLOWED_CIDRS` doesn't take the Worker down. An empty result
+/// still fails every request closed, since `ip_allowed` treats "no ranges"
+/// as "nothing matches".
 fn parse_cidr_list(raw: &str) -> Vec<IpNetwork> {
     raw.split(',').map(str::trim).filter(|s| !s.is_empty()).filter_map(|s| s.parse().ok()).collect()
 }
@@ -79,9 +79,9 @@ const JOSE_JSON: &str = "application/jose+json";
 /// `/rec`'s content type in the Tang wire protocol, matching the reference
 /// `tangy` server.
 const JWK_JSON: &str = "application/jwk+json";
-/// The route pattern's named parameter for the recovery key ID, and the
-/// key `ctx.param` looks it up by -- kept as one constant so the two can't
-/// drift apart silently.
+/// The route pattern's named parameter for the recovery key ID, and the key
+/// `ctx.param` looks it up by, kept as one constant so the two can't drift
+/// apart silently.
 const KID_PARAM: &str = "kid";
 
 /// A `Headers` with a single `content-type` entry set to `value`.
@@ -92,8 +92,8 @@ fn content_type_headers(value: &str) -> Headers {
 }
 
 /// Loads both Tang keys from the combined `TANG_KEYS` secret and builds a
-/// `TangyLib` for this request. Cheap -- key loading is JSON parsing, not
-/// computation -- so there's no benefit to caching it across
+/// `TangyLib` for this request. Key loading is just JSON parsing, not real
+/// computation, so there's no benefit to caching it across
 /// requests/isolates.
 fn load_tangy(env: &Env) -> std::result::Result<TangyLib, StatusCode> {
     let raw = env.secret(TANG_KEYS_SECRET).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?.to_string();
@@ -128,16 +128,16 @@ fn is_p521_coordinate(field: &str) -> bool {
     base64ct::Base64UrlUnpadded::decode_vec(field).is_ok_and(|bytes| bytes.len() == P521_COORDINATE_BYTE_LEN)
 }
 
-/// True if `body` parses as JSON shaped like the EC public JWK
-/// `tangy_lib::TangyLib::rec` expects. `tangy-lib` parses its input with
-/// bare `.unwrap()`s rather than returning an error, so anything malformed
-/// reaching it panics -- and this project's `panic = "abort"` profile turns
-/// that into a whole-instance reinit, not just a failed request. Deserializing
-/// into tangy-lib's own `MyJwkEcKey` -- rather than a hand-rolled subset of
-/// its fields -- catches every shape mismatch it would itself reject,
-/// including an unrelated field present with the wrong JSON type; a
-/// syntactically valid but off-curve point still reaches the unwrap, since
-/// detecting that needs the curve arithmetic `tangy-lib` itself does.
+/// True if `body` parses as the EC public JWK `tangy_lib::TangyLib::rec`
+/// expects. `tangy-lib` parses its input with bare `.unwrap()`s rather than
+/// returning an error, so anything malformed reaching it panics, and this
+/// project's `panic = "abort"` profile turns that into a whole-instance
+/// reinit rather than just a failed request. Deserializing into tangy-lib's
+/// own `MyJwkEcKey`, instead of a hand-rolled subset of its fields, catches
+/// every shape mismatch it would itself reject, including an unrelated
+/// field present with the wrong JSON type. A syntactically valid but
+/// off-curve point still reaches the unwrap, since detecting that needs the
+/// curve arithmetic `tangy-lib` itself does.
 fn looks_like_ec_point(body: &str) -> bool {
     let Ok(key) = serde_json::from_str::<MyJwkEcKey>(body) else { return false };
     key.kty == "EC" && key.crv == "P-521" && is_p521_coordinate(&key.x) && is_p521_coordinate(&key.y)
