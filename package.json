@@ -1,0 +1,13 @@
+{
+  "name": "tang-cloudflare",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tang (NBDE) server, deployed as a Cloudflare Worker.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.133.0"
+  }
+}

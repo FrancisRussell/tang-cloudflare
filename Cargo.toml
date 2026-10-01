@@ -1,0 +1,26 @@
+[package]
+name = "tang-cloudflare"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.91"
+license = "MIT OR Apache-2.0"
+description = "Tang (Network-Bound Disk Encryption) server, deployed as a Cloudflare Worker."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+base64ct = { version = "1", default-features = false, features = ["alloc"] }
+console_error_panic_hook = "0.1"
+http = { version = "1", default-features = false, features = ["std"] }
+ipnetwork = { version = "0.20", default-features = false }
+serde = { version = "1", default-features = false, features = ["std", "derive"] }
+serde_json = { version = "1", default-features = false, features = ["std"] }
+tangy-lib = "0.1"
+worker = { version = "0.8", default-features = false }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = "debuginfo"
+panic = "abort"
