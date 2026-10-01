@@ -14,7 +14,6 @@ base64ct = { version = "1", default-features = false, features = ["alloc"] }
 console_error_panic_hook = "0.1"
 http = { version = "1", default-features = false, features = ["std"] }
 ipnetwork = { version = "0.20", default-features = false }
-serde = { version = "1", default-features = false, features = ["std", "derive"] }
 serde_json = { version = "1", default-features = false, features = ["std"] }
 tangy-lib = "0.1"
 worker = { version = "0.8", default-features = false }

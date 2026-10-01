@@ -850,7 +850,6 @@ dependencies = [
  "console_error_panic_hook",
  "http",
  "ipnetwork",
- "serde",
  "serde_json",
  "tangy-lib",
  "worker",

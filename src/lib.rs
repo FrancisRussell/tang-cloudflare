@@ -16,7 +16,7 @@
 use base64ct::Encoding;
 use http::StatusCode;
 use ipnetwork::IpNetwork;
-use tangy_lib::{KeySource, TangyLib};
+use tangy_lib::{KeySource, MyJwkEcKey, TangyLib};
 use worker::*;
 
 mod header_names {
@@ -118,17 +118,6 @@ async fn handle_adv(req: Request, ctx: RouteContext<()>) -> Result<Response> {
     }
 }
 
-/// The subset of JWK fields `looks_like_ec_point` checks; extra fields in
-/// the body (there are others, in real requests) are ignored rather than
-/// rejected.
-#[derive(serde::Deserialize)]
-struct EcPointFields {
-    kty: String,
-    crv: String,
-    x: String,
-    y: String,
-}
-
 /// A P-521 field element's encoded length: 521 bits, rounded up to whole
 /// bytes.
 const P521_COORDINATE_BYTE_LEN: usize = 66;
@@ -143,14 +132,15 @@ fn is_p521_coordinate(field: &str) -> bool {
 /// `tangy_lib::TangyLib::rec` expects. `tangy-lib` parses its input with
 /// bare `.unwrap()`s rather than returning an error, so anything malformed
 /// reaching it panics -- and this project's `panic = "abort"` profile turns
-/// that into a whole-instance reinit, not just a failed request. This
-/// catches the common cases (malformed JSON, wrong shape, wrong curve, or
-/// non-base64 coordinates) before that call; a syntactically valid but
-/// off-curve point still reaches the unwrap, since detecting that needs the
-/// curve arithmetic `tangy-lib` itself does.
+/// that into a whole-instance reinit, not just a failed request. Deserializing
+/// into tangy-lib's own `MyJwkEcKey` -- rather than a hand-rolled subset of
+/// its fields -- catches every shape mismatch it would itself reject,
+/// including an unrelated field present with the wrong JSON type; a
+/// syntactically valid but off-curve point still reaches the unwrap, since
+/// detecting that needs the curve arithmetic `tangy-lib` itself does.
 fn looks_like_ec_point(body: &str) -> bool {
-    let Ok(fields) = serde_json::from_str::<EcPointFields>(body) else { return false };
-    fields.kty == "EC" && fields.crv == "P-521" && is_p521_coordinate(&fields.x) && is_p521_coordinate(&fields.y)
+    let Ok(key) = serde_json::from_str::<MyJwkEcKey>(body) else { return false };
+    key.kty == "EC" && key.crv == "P-521" && is_p521_coordinate(&key.x) && is_p521_coordinate(&key.y)
 }
 
 /// Handles `POST /rec/:kid`.
