@@ -173,3 +173,105 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let rec_pattern = format!("/rec/:{KID_PARAM}");
     Router::new().get_async("/adv", handle_adv).post_async(&rec_pattern, handle_rec).run(req, env).await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A valid base64url-encoded coordinate of exactly `byte_len` bytes, for
+    /// exercising `is_p521_coordinate`'s length check without a hardcoded
+    /// magic string.
+    fn b64_coordinate_of_len(byte_len: usize) -> String {
+        base64ct::Base64UrlUnpadded::encode_string(&vec![0u8; byte_len])
+    }
+
+    fn valid_rec_body() -> String {
+        let coord = b64_coordinate_of_len(P521_COORDINATE_BYTE_LEN);
+        format!(r#"{{"kty":"EC","crv":"P-521","x":"{coord}","y":"{coord}"}}"#)
+    }
+
+    #[test]
+    fn test_parse_cidr_list_parses_each_valid_entry() {
+        let allowed = parse_cidr_list("203.0.113.0/24, 198.51.100.0/24");
+        for ip in ["203.0.113.5", "198.51.100.5"] {
+            let addr = ip.parse().expect("test address literal must parse");
+            assert!(allowed.iter().any(|net| net.contains(addr)), "ip: {ip}");
+        }
+    }
+
+    #[test]
+    fn test_parse_cidr_list_drops_unparseable_entries_but_keeps_the_rest() {
+        let allowed = parse_cidr_list("not-a-cidr, 203.0.113.0/24");
+        let addr = "203.0.113.1".parse().expect("test address literal must parse");
+        assert_eq!(allowed.len(), 1);
+        assert!(allowed[0].contains(addr));
+    }
+
+    #[test]
+    fn test_parse_cidr_list_empty_input_yields_no_ranges() {
+        assert!(parse_cidr_list("").is_empty());
+    }
+
+    #[test]
+    fn test_parse_cidr_list_trims_surrounding_whitespace() {
+        let allowed = parse_cidr_list("  203.0.113.0/24 ,198.51.100.0/24  ");
+        assert_eq!(allowed.len(), 2);
+    }
+
+    #[test]
+    fn test_is_p521_coordinate_accepts_exact_length() {
+        assert!(is_p521_coordinate(&b64_coordinate_of_len(P521_COORDINATE_BYTE_LEN)));
+    }
+
+    #[test]
+    fn test_is_p521_coordinate_rejects_short_and_long_values() {
+        assert!(!is_p521_coordinate(&b64_coordinate_of_len(P521_COORDINATE_BYTE_LEN - 1)));
+        assert!(!is_p521_coordinate(&b64_coordinate_of_len(P521_COORDINATE_BYTE_LEN + 1)));
+    }
+
+    #[test]
+    fn test_is_p521_coordinate_rejects_non_base64() {
+        assert!(!is_p521_coordinate("not valid base64url!"));
+    }
+
+    #[test]
+    fn test_looks_like_ec_point_accepts_a_well_formed_point() {
+        assert!(looks_like_ec_point(&valid_rec_body()));
+    }
+
+    #[test]
+    fn test_looks_like_ec_point_rejects_malformed_json() {
+        assert!(!looks_like_ec_point("not json"));
+    }
+
+    #[test]
+    fn test_looks_like_ec_point_rejects_the_wrong_curve() {
+        let coord = b64_coordinate_of_len(P521_COORDINATE_BYTE_LEN);
+        let body = format!(r#"{{"kty":"EC","crv":"P-256","x":"{coord}","y":"{coord}"}}"#);
+        assert!(!looks_like_ec_point(&body));
+    }
+
+    #[test]
+    fn test_looks_like_ec_point_rejects_the_wrong_key_type() {
+        let coord = b64_coordinate_of_len(P521_COORDINATE_BYTE_LEN);
+        let body = format!(r#"{{"kty":"RSA","crv":"P-521","x":"{coord}","y":"{coord}"}}"#);
+        assert!(!looks_like_ec_point(&body));
+    }
+
+    #[test]
+    fn test_looks_like_ec_point_rejects_wrong_length_coordinates() {
+        let short = b64_coordinate_of_len(P521_COORDINATE_BYTE_LEN - 1);
+        let body = format!(r#"{{"kty":"EC","crv":"P-521","x":"{short}","y":"{short}"}}"#);
+        assert!(!looks_like_ec_point(&body));
+    }
+
+    /// Guards against a recognized `tangy_lib::MyJwkEcKey` field (e.g.
+    /// `alg`) carrying the wrong JSON type, which would otherwise panic
+    /// once the body reaches `MyJwkEcKey`'s own deserialize.
+    #[test]
+    fn test_looks_like_ec_point_rejects_a_known_field_with_the_wrong_type() {
+        let coord = b64_coordinate_of_len(P521_COORDINATE_BYTE_LEN);
+        let body = format!(r#"{{"kty":"EC","crv":"P-521","x":"{coord}","y":"{coord}","alg":123}}"#);
+        assert!(!looks_like_ec_point(&body));
+    }
+}
