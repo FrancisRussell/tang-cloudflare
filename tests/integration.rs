@@ -159,33 +159,6 @@ fn write_dev_vars(dir: &Path, tang_keys_json: &str) {
         .expect("failed to write .dev.vars");
 }
 
-/// Seeds the local KV store `wrangler dev` reads `ALLOWED_CIDRS_KV` from,
-/// using the same `--persist-to` directory and config file `wrangler dev`
-/// runs with, so it finds what's written here. Done before starting
-/// `wrangler dev`, so the allowlist is in place from its very first
-/// request.
-fn seed_allowed_cidrs_kv(dir: &Path, config_path: &Path) {
-    let status = Command::new("npx")
-        .args([
-            "wrangler",
-            "kv",
-            "key",
-            "put",
-            ALLOWED_CIDRS_KV_KEY,
-            ALLOWED_CIDR,
-            "--binding=ALLOWED_CIDRS_KV",
-            "--local",
-            "--config",
-            config_path.to_str().expect("temp dir path must be valid UTF-8"),
-            "--persist-to",
-            dir.to_str().expect("temp dir path must be valid UTF-8"),
-        ])
-        .current_dir(PROJECT_DIR)
-        .status()
-        .expect("failed to run `npx wrangler kv key put` (is Node/npm installed?)");
-    assert!(status.success(), "seeding the local ALLOWED_CIDRS_KV store failed");
-}
-
 /// Runs the real `keygen` binary, already built by Cargo as a prerequisite
 /// of this test binary, and returns its stdout: the combined `{"sig": ...,
 /// "exc": ...}` JSON the `TANG_KEYS` secret expects.
@@ -231,7 +204,6 @@ impl WranglerDev {
 
         let config_path = write_test_wrangler_config(&persist_dir);
         write_dev_vars(&persist_dir, tang_keys_json);
-        seed_allowed_cidrs_kv(&persist_dir, &config_path);
 
         let port = pick_free_port();
         let output = Arc::new(Mutex::new(Vec::new()));
@@ -272,11 +244,41 @@ impl WranglerDev {
 
         let dev = Self { child, port, output, persist_dir };
         dev.wait_until_ready();
+        dev.seed_allowed_cidrs_kv();
         dev
     }
 
     /// The local base URL `wrangler dev` is listening on.
     fn base_url(&self) -> String { format!("http://127.0.0.1:{}", self.port) }
+
+    /// The id `wrangler dev`'s local explorer API gives the (only) KV
+    /// namespace declared in wrangler.toml.
+    fn find_kv_namespace_id(&self) -> String {
+        let url = format!("{}/cdn-cgi/local/explorer/api/storage/kv/namespaces", self.base_url());
+        let listing = ureq::get(&url)
+            .timeout(REQUEST_TIMEOUT)
+            .call()
+            .unwrap_or_else(|e| panic!("wrangler dev's local explorer API is unavailable ({e}); is wrangler current?"))
+            .into_string()
+            .expect("the namespace listing is readable");
+        let after_id = listing.split_once("\"id\":\"").expect("the namespace listing has an id").1;
+        after_id.split_once('"').expect("the id is quoted").0.to_string()
+    }
+
+    /// Seeds `ALLOWED_CIDRS_KV` through `wrangler dev`'s own local explorer
+    /// API, which answers in milliseconds, rather than a separate `wrangler
+    /// kv` CLI invocation, which pays Node's whole startup each time.
+    fn seed_allowed_cidrs_kv(&self) {
+        let namespace_id = self.find_kv_namespace_id();
+        let url = format!(
+            "{}/cdn-cgi/local/explorer/api/storage/kv/namespaces/{namespace_id}/values/{ALLOWED_CIDRS_KV_KEY}",
+            self.base_url()
+        );
+        ureq::put(&url)
+            .timeout(REQUEST_TIMEOUT)
+            .send_string(ALLOWED_CIDR)
+            .unwrap_or_else(|e| panic!("seeding ALLOWED_CIDRS_KV via the local explorer API failed: {e}"));
+    }
 
     fn captured_output(&self) -> String {
         String::from_utf8_lossy(&self.output.lock().expect("a thread panicked while holding the lock")).into_owned()
