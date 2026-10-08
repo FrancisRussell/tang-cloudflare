@@ -12,6 +12,10 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 base64ct = { version = "1", default-features = false, features = ["alloc"] }
 console_error_panic_hook = "0.1"
+# tangy-lib's own OsRng usage pulls in getrandom transitively; its "js"
+# feature is required to even compile for wasm32-unknown-unknown, which
+# otherwise hard-errors (see getrandom's own compile_error!).
+getrandom = { version = "0.2", default-features = false, features = ["js"] }
 http = { version = "1", default-features = false, features = ["std"] }
 ipnetwork = { version = "0.20", default-features = false }
 serde_json = { version = "1", default-features = false, features = ["std"] }
