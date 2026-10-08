@@ -17,12 +17,25 @@ jobs:
         with:
           command: install-rustup
           toolchain: stable
+          target: wasm32-unknown-unknown
           profile: minimal
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
       - uses: FrancisRussell/ferrous-actions@v1
         name: Cargo test (lib)
         with:
           command: cargo test
           args: --lib
+      # Builds the real Wasm artifact (via wrangler dev's own build step) and
+      # exercises it against a local workerd instance.
+      - uses: FrancisRussell/ferrous-actions@v1
+        name: Cargo test (integration)
+        with:
+          command: cargo test
+          args: --features integration-tests --test integration
 
   clippy:
     name: Clippy
@@ -46,6 +59,11 @@ jobs:
         with:
           command: cargo clippy
           args: --target wasm32-unknown-unknown -- -D warnings
+      - uses: FrancisRussell/ferrous-actions@v1
+        name: Clippy (integration test)
+        with:
+          command: cargo clippy
+          args: --features integration-tests --test integration -- -D warnings
 
   fmt:
     name: Rustfmt
