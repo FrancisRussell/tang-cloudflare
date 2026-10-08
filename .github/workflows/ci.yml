@@ -1,0 +1,69 @@
+on: [push]
+
+name: CI
+
+jobs:
+  test:
+    name: Cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: FrancisRussell/ferrous-actions@v1
+        name: Cargo cache
+        with:
+          command: cache
+      - uses: FrancisRussell/ferrous-actions@v1
+        name: Install Rustup
+        with:
+          command: install-rustup
+          toolchain: stable
+          profile: minimal
+      - uses: FrancisRussell/ferrous-actions@v1
+        name: Cargo test (lib)
+        with:
+          command: cargo test
+          args: --lib
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: FrancisRussell/ferrous-actions@v1
+        name: Cargo cache
+        with:
+          command: cache
+      - uses: FrancisRussell/ferrous-actions@v1
+        name: Install Rustup
+        with:
+          command: install-rustup
+          toolchain: stable
+          target: wasm32-unknown-unknown
+          profile: minimal
+          components: clippy
+      - uses: FrancisRussell/ferrous-actions@v1
+        name: Clippy (lib, wasm target)
+        with:
+          command: cargo clippy
+          args: --target wasm32-unknown-unknown -- -D warnings
+
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: FrancisRussell/ferrous-actions@v1
+        name: Install Rustup (nightly)
+        with:
+          command: install-rustup
+          toolchain: nightly
+          profile: minimal
+          components: rustfmt
+      # rustfmt.toml sets options only nightly rustfmt honours; the stable
+      # toolchain pinned by rust-toolchain.toml doesn't apply them.
+      - uses: FrancisRussell/ferrous-actions@v1
+        name: Cargo fmt --check
+        with:
+          command: cargo fmt
+          toolchain: nightly
+          args: --check
