@@ -2,6 +2,7 @@
 /build
 /node_modules
 .wrangler
+.dev.vars
 tags
 tags.lock
 tags.temp

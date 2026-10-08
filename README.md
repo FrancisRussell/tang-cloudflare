@@ -71,26 +71,43 @@ else:
 
 1. Copy `tang-keys.json` into a password manager or other durable, offline
    backup.
-2. Upload it to Cloudflare: `wrangler secret put TANG_KEYS < tang-keys.json`
+2. Upload it to Cloudflare: `npm run upload-key`
 3. Delete the local file.
 
 To rotate the keys later, repeat this whole process. It replaces the key set
 entirely rather than extending it, so any machine still bound to the old
 keys will need rebinding.
 
-### 4. Set the allowed IP address
+### 4. Create the allowlist's KV namespace
 
-Edit `ALLOWED_CIDRS` in `wrangler.toml` to the real IP address of the
-machine this Worker will serve, and commit the change: this file is the
-record of who's allowed to reach it.
+```sh
+npx wrangler kv namespace create tang-allowed-cidrs
+```
 
-### 5. Deploy
+Paste the printed `id` into `wrangler.toml`'s `[[kv_namespaces]]` block, in
+place of `REPLACE_WITH_NAMESPACE_ID`. A one-time step: every future deploy
+reuses the same namespace once its `id` is there.
+
+### 5. Set the allowed IP address
+
+```sh
+npm run set-allowlist -- 203.0.113.4/32
+```
+
+The real IP address, or comma-separated CIDR ranges, of the machine(s) this
+Worker will serve. It's set directly in Cloudflare's KV store, independent
+of `wrangler.toml` and of any deploy, so the VPS's real IP never ends up
+committed to this repo, and changing it later doesn't need a redeploy.
+`npm run get-allowlist` reads the current value back, if you ever need to
+check it.
+
+### 6. Deploy
 
 ```sh
 npm run deploy
 ```
 
-### 6. Point the VPS at it
+### 7. Point the VPS at it
 
 On the machine being unlocked, `clevis` needs pointing at this Worker's
 `*.workers.dev` URL (or a custom domain) as its Tang server. That side of
@@ -103,9 +120,13 @@ script) lives elsewhere; this repo is only the server.
 npx wrangler dev
 ```
 
-Needs its own local `TANG_KEYS` secret and `ALLOWED_CIDRS` value to answer
-requests; see Cloudflare's docs on `wrangler dev` for supplying secrets
-locally.
+Needs its own local `TANG_KEYS` secret (see Cloudflare's docs on
+`wrangler dev` for supplying secrets locally) and a local CIDR list in
+`ALLOWED_CIDRS_KV`'s simulated namespace to answer requests, e.g.:
+
+```sh
+npx wrangler kv key put --binding=ALLOWED_CIDRS_KV --local cidrs 203.0.113.4/32
+```
 
 ## Security notes
 

@@ -53,8 +53,8 @@ const JOSE_JSON: &str = "application/jose+json";
 /// reason as `JOSE_JSON`.
 const JWK_JSON: &str = "application/jwk+json";
 
-/// The CIDR this run's `ALLOWED_CIDRS` is set to, and an address inside and
-/// outside it.
+/// The CIDR this run's `ALLOWED_CIDRS_KV` is seeded with, and an address
+/// inside and outside it.
 const ALLOWED_CIDR: &str = "203.0.113.50/32";
 const ALLOWED_IP: &str = "203.0.113.50";
 const DISALLOWED_IP: &str = "8.8.8.8";
@@ -149,12 +149,37 @@ fn write_test_wrangler_config(dir: &Path) -> PathBuf {
 }
 
 /// Writes the `.dev.vars` file `wrangler dev` loads local secrets from.
-/// `ALLOWED_CIDRS` is a plain `[vars]` entry, so it's set via `--var`
-/// instead; `TANG_KEYS` is a secret, which `wrangler dev` only picks up
-/// this way.
+/// `TANG_KEYS` is a secret, which `wrangler dev` only picks up this way.
 fn write_dev_vars(dir: &Path, tang_keys_json: &str) {
     std::fs::write(dir.join(".dev.vars"), format!("TANG_KEYS='{tang_keys_json}'\n"))
         .expect("failed to write .dev.vars");
+}
+
+/// Seeds the local KV store `wrangler dev` reads `ALLOWED_CIDRS_KV` from,
+/// using the same `--persist-to` directory and config file `wrangler dev`
+/// runs with, so it finds what's written here. Done before starting
+/// `wrangler dev`, so the allowlist is in place from its very first
+/// request.
+fn seed_allowed_cidrs_kv(dir: &Path, config_path: &Path) {
+    let status = Command::new("npx")
+        .args([
+            "wrangler",
+            "kv",
+            "key",
+            "put",
+            "cidrs",
+            ALLOWED_CIDR,
+            "--binding=ALLOWED_CIDRS_KV",
+            "--local",
+            "--config",
+            config_path.to_str().expect("temp dir path must be valid UTF-8"),
+            "--persist-to",
+            dir.to_str().expect("temp dir path must be valid UTF-8"),
+        ])
+        .current_dir(PROJECT_DIR)
+        .status()
+        .expect("failed to run `npx wrangler kv key put` (is Node/npm installed?)");
+    assert!(status.success(), "seeding the local ALLOWED_CIDRS_KV store failed");
 }
 
 /// Runs the real `keygen` binary, already built by Cargo as a prerequisite
@@ -202,6 +227,7 @@ impl WranglerDev {
 
         let config_path = write_test_wrangler_config(&persist_dir);
         write_dev_vars(&persist_dir, tang_keys_json);
+        seed_allowed_cidrs_kv(&persist_dir, &config_path);
 
         let port = pick_free_port();
         let output = Arc::new(Mutex::new(Vec::new()));
@@ -221,8 +247,6 @@ impl WranglerDev {
                 config_path.to_str().expect("temp dir path must be valid UTF-8"),
                 "--port",
                 &port.to_string(),
-                "--var",
-                &format!("ALLOWED_CIDRS:{ALLOWED_CIDR}"),
                 "--persist-to",
                 persist_dir.to_str().expect("temp dir path must be valid UTF-8"),
             ])

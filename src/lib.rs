@@ -28,10 +28,18 @@ mod header_names {
     pub const CF_CONNECTING_IP: HeaderName = HeaderName::from_static("cf-connecting-ip");
 }
 
-/// Wrangler var: comma-separated CIDR ranges (v4 and/or v6) allowed to
-/// reach `/adv` and `/rec`. See wrangler.toml for the operational guidance
-/// on keeping this tight.
-const ALLOWED_CIDRS_VAR: &str = "ALLOWED_CIDRS";
+/// KV namespace holding a comma-separated CIDR list (v4 and/or v6) of who's
+/// allowed to reach `/adv` and `/rec`: the VPS(es) this Tang instance
+/// actually serves, and the sole access control (Clevis, the client, sends
+/// no header beyond Content-Type and has no config option to add one, so
+/// there's no bearer credential to check alongside this). KV rather than a
+/// var or secret, so it's set with `wrangler kv key put`, independent of
+/// any code deploy, and never has to live in a local file or in
+/// wrangler.toml. Keep it as tight as the real network topology allows (a
+/// bare /32 or /128) unless there's a concrete reason to widen it.
+const ALLOWED_CIDRS_KV_BINDING: &str = "ALLOWED_CIDRS_KV";
+/// The single key `ALLOWED_CIDRS_KV` is read and written under.
+const ALLOWED_CIDRS_KV_KEY: &str = "cidrs";
 
 /// Secret holding both Tang keys as one JSON object, `{"sig": {...JWK...},
 /// "exc": {...JWK...}}`, so it's set with a single direct paste rather
@@ -43,9 +51,9 @@ fn get_client_ip(req: &Request) -> Option<String> {
     req.headers().get(header_names::CF_CONNECTING_IP.as_str()).ok().flatten()
 }
 
-/// Parses a comma-separated CIDR list from a wrangler var. An entry that
-/// fails to parse is dropped rather than failing the whole request, so one
-/// typo in `ALLOWED_CIDRS` doesn't take the Worker down. An empty result
+/// Parses the comma-separated CIDR list read from `ALLOWED_CIDRS_KV`. An
+/// entry that fails to parse is dropped rather than failing the whole
+/// request, so one typo doesn't take the Worker down. An empty result
 /// still fails every request closed, since `ip_allowed` treats "no ranges"
 /// as "nothing matches".
 fn parse_cidr_list(raw: &str) -> Vec<IpNetwork> {
@@ -61,10 +69,12 @@ fn ip_allowed(req: &Request, allowed: &[IpNetwork]) -> bool {
     allowed.iter().any(|net| net.contains(ip))
 }
 
-/// True if `req` is allowed to reach `/adv` or `/rec`, per `ALLOWED_CIDRS`.
-fn authorized(req: &Request, env: &Env) -> bool {
-    let Ok(allowed_cidrs) = env.var(ALLOWED_CIDRS_VAR) else { return false };
-    let allowed = parse_cidr_list(&allowed_cidrs.to_string());
+/// True if `req` is allowed to reach `/adv` or `/rec`, per the CIDR list in
+/// `ALLOWED_CIDRS_KV`.
+async fn authorized(req: &Request, env: &Env) -> bool {
+    let Ok(kv) = env.kv(ALLOWED_CIDRS_KV_BINDING) else { return false };
+    let Ok(Some(allowed_cidrs)) = kv.get(ALLOWED_CIDRS_KV_KEY).text().await else { return false };
+    let allowed = parse_cidr_list(&allowed_cidrs);
     !allowed.is_empty() && ip_allowed(req, &allowed)
 }
 
@@ -107,7 +117,7 @@ fn load_tangy(env: &Env) -> std::result::Result<TangyLib, StatusCode> {
 
 /// Handles `GET /adv`.
 async fn handle_adv(req: Request, ctx: RouteContext<()>) -> Result<Response> {
-    if !authorized(&req, &ctx.env) {
+    if !authorized(&req, &ctx.env).await {
         return error_response(StatusCode::FORBIDDEN);
     }
     let tangy = match load_tangy(&ctx.env) {
@@ -147,7 +157,7 @@ fn looks_like_ec_point(body: &str) -> bool {
 
 /// Handles `POST /rec/:kid`.
 async fn handle_rec(mut req: Request, ctx: RouteContext<()>) -> Result<Response> {
-    if !authorized(&req, &ctx.env) {
+    if !authorized(&req, &ctx.env).await {
         return error_response(StatusCode::FORBIDDEN);
     }
     let Some(kid) = ctx.param(KID_PARAM).cloned() else {

@@ -5,7 +5,10 @@
   "description": "Tang (NBDE) server, deployed as a Cloudflare Worker.",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "upload-key": "wrangler secret put TANG_KEYS < tang-keys.json",
+    "set-allowlist": "wrangler kv key put --binding=ALLOWED_CIDRS_KV --remote cidrs",
+    "get-allowlist": "wrangler kv key get --binding=ALLOWED_CIDRS_KV --remote cidrs"
   },
   "devDependencies": {
     "wrangler": "^4.133.0"
