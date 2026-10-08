@@ -39,7 +39,9 @@ const ALLOWED_CIDRS_VAR: &str = "ALLOWED_CIDRS";
 const TANG_KEYS_SECRET: &str = "TANG_KEYS";
 
 /// The request's `CF-Connecting-IP` header, if present.
-fn get_client_ip(req: &Request) -> Option<String> { req.headers().get(header_names::CF_CONNECTING_IP.as_str()).ok().flatten() }
+fn get_client_ip(req: &Request) -> Option<String> {
+    req.headers().get(header_names::CF_CONNECTING_IP.as_str()).ok().flatten()
+}
 
 /// Parses a comma-separated CIDR list from a wrangler var. An entry that
 /// fails to parse is dropped rather than failing the whole request, so one
