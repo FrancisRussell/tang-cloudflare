@@ -6,8 +6,8 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "upload-key": "wrangler secret put TANG_KEYS < tang-keys.json",
-    "set-allowlist": "wrangler kv key put --binding=ALLOWED_CIDRS_KV --remote cidrs",
+    "upload-key": "bash scripts/upload-key.sh",
+    "set-allowlist": "bash scripts/set-allowlist.sh",
     "get-allowlist": "wrangler kv key get --binding=ALLOWED_CIDRS_KV --remote cidrs"
   },
   "devDependencies": {

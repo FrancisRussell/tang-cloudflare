@@ -71,7 +71,12 @@ else:
 
 1. Copy `tang-keys.json` into a password manager or other durable, offline
    backup.
-2. Upload it to Cloudflare: `npm run upload-key`
+2. Upload it to Cloudflare: `npm run upload-key`. This first validates the
+   file with `check-key`, the same parsing and initialization the Worker
+   itself runs, catching a corrupt or malformed key before it ever reaches
+   Cloudflare. Takes a path other than `tang-keys.json`, e.g.
+   `npm run upload-key -- rotated-keys.json`, if the file isn't under that
+   name.
 3. Delete the local file.
 
 To rotate the keys later, repeat this whole process. It replaces the key set
@@ -100,6 +105,12 @@ of `wrangler.toml` and of any deploy, so the VPS's real IP never ends up
 committed to this repo, and changing it later doesn't need a redeploy.
 `npm run get-allowlist` reads the current value back, if you ever need to
 check it.
+
+`npm run set-allowlist` first validates the list with `check-allowlist`,
+the same parser the Worker itself uses, since the Worker's own parsing
+silently drops any entry that fails to parse rather than failing the whole
+request. A typo here would otherwise go unnoticed until the VPS actually
+needs to unlock.
 
 ### 6. Deploy
 

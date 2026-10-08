@@ -64,6 +64,14 @@ jobs:
         with:
           command: cargo clippy
           args: --features integration-tests --test integration -- -D warnings
+      # keygen, check-key and check-allowlist are native CLI tools, not
+      # part of the deployed Worker, so they're not covered by the wasm
+      # target build above.
+      - uses: FrancisRussell/ferrous-actions@v1
+        name: Clippy (bins, host target)
+        with:
+          command: cargo clippy
+          args: --bins -- -D warnings
 
   fmt:
     name: Rustfmt

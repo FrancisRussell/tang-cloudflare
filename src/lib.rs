@@ -51,13 +51,33 @@ fn get_client_ip(req: &Request) -> Option<String> {
     req.headers().get(header_names::CF_CONNECTING_IP.as_str()).ok().flatten()
 }
 
+/// Splits a comma-separated CIDR list into trimmed, non-empty entries.
+fn cidr_entries(raw: &str) -> impl Iterator<Item = &str> { raw.split(',').map(str::trim).filter(|s| !s.is_empty()) }
+
 /// Parses the comma-separated CIDR list read from `ALLOWED_CIDRS_KV`. An
 /// entry that fails to parse is dropped rather than failing the whole
 /// request, so one typo doesn't take the Worker down. An empty result
 /// still fails every request closed, since `ip_allowed` treats "no ranges"
 /// as "nothing matches".
-fn parse_cidr_list(raw: &str) -> Vec<IpNetwork> {
-    raw.split(',').map(str::trim).filter(|s| !s.is_empty()).filter_map(|s| s.parse().ok()).collect()
+fn parse_cidr_list(raw: &str) -> Vec<IpNetwork> { cidr_entries(raw).filter_map(|s| s.parse().ok()).collect() }
+
+/// Checks that every entry in a comma-separated CIDR list parses, unlike
+/// `parse_cidr_list`, which silently drops a bad one so a single typo
+/// doesn't take the Worker down for every other entry. Used by
+/// `check-allowlist` to catch that typo before it's ever set as
+/// `ALLOWED_CIDRS_KV`'s value, where it would otherwise go unnoticed until
+/// the VPS can't unlock.
+pub fn check_cidr_list(raw: &str) -> std::result::Result<(), String> {
+    let mut any = false;
+    for entry in cidr_entries(raw) {
+        any = true;
+        entry.parse::<IpNetwork>().map_err(|e| format!("{entry:?} is not a valid CIDR: {e}"))?;
+    }
+    if any {
+        Ok(())
+    } else {
+        Err("no CIDR entries found".to_string())
+    }
 }
 
 /// True if `req`'s `CF-Connecting-IP` falls within one of `allowed`. Fails
@@ -103,16 +123,53 @@ fn content_type_headers(value: &str) -> Headers {
     headers
 }
 
+/// Parses the combined `{"sig": ..., "exc": ...}` JSON `TANG_KEYS` and
+/// `check-key` both expect, and builds a `TangyLib` from it. Shared so
+/// there's one parsing/initialization path for both: this project's own
+/// JSON-shape checks, plus whatever `TangyLib::init` itself validates.
+pub fn load_tangy_from_json(raw: &str) -> std::result::Result<TangyLib, String> {
+    let parsed: serde_json::Value = serde_json::from_str(raw).map_err(|e| format!("not valid JSON: {e}"))?;
+    let sig = parsed.get("sig").ok_or("missing \"sig\" key")?.to_string();
+    let exc = parsed.get("exc").ok_or("missing \"exc\" key")?.to_string();
+    TangyLib::init(KeySource::Vector(&vec![sig.as_str(), exc.as_str()])).map_err(|e| e.to_string())
+}
+
+/// The P-521 curve's generator point, in the same JWK coordinate encoding
+/// as a request body. Used below purely as a throwaway but genuinely
+/// on-curve point: its value doesn't matter, only that it's valid, so
+/// rather than transcribe the published constant (FIPS 186-4 / SP 800-186
+/// give it in hex, risking a transcription error in a 521-bit literal),
+/// this was read off `p521::ProjectivePoint::generator()` directly, the
+/// same crate tangy-lib itself uses, via a throwaway `cargo run --example`
+/// (not kept in this repo).
+const GENERATOR_X: &str = "AMaFjga3BATpzZ4-y2YjlbRCnGSBOQU_tSH4KK9ga009uqFLXnfv51ko_h3BJ6L_qN4zSLPBhWpCm_l-fjHC5b1m";
+const GENERATOR_Y: &str = "ARg5KWp4mjvABFyKX7QsfRvZmPVESVebRGgXr70XJz5mLJfucple9CZAxVC5AT-tB2E1PHCGonLCQIi-lHaf0WZQ";
+
+/// Validates a combined Tang key-set JSON more thoroughly than
+/// `load_tangy_from_json` alone: that only exercises the signing key's
+/// private scalar (via `TangyLib::init`'s precomputed advertisement). The
+/// exchange key's private scalar is never converted until an actual
+/// `/rec` request names it by its own `kid`, so this exercises that path
+/// too, with a throwaway on-curve point standing in for the client's
+/// half of the exchange. Used by `check-key`; the Worker itself has no
+/// reason to validate its own key on every request.
+pub fn check_tangy_keys(raw: &str) -> std::result::Result<(), String> {
+    let tangy = load_tangy_from_json(raw)?;
+    let parsed: serde_json::Value = serde_json::from_str(raw).map_err(|e| format!("not valid JSON: {e}"))?;
+    let exc = parsed.get("exc").ok_or("missing \"exc\" key")?.to_string();
+    let exc: MyJwkEcKey = serde_json::from_str(&exc).map_err(|e| format!("\"exc\" is not a valid JWK: {e}"))?;
+    let dummy_request = format!(r#"{{"kty":"EC","crv":"P-521","x":"{GENERATOR_X}","y":"{GENERATOR_Y}"}}"#);
+    tangy.rec(&exc.thumbprint(), &dummy_request).map(|_| ()).map_err(|e| format!("exchange key rejected: {e}"))
+}
+
 /// Loads both Tang keys from the combined `TANG_KEYS` secret and builds a
 /// `TangyLib` for this request. Key loading is just JSON parsing, not real
 /// computation, so there's no benefit to caching it across
-/// requests/isolates.
+/// requests/isolates. Discards `load_tangy_from_json`'s specific error,
+/// rather than exposing key-handling details to the client.
 fn load_tangy(env: &Env) -> std::result::Result<TangyLib, StatusCode> {
     let raw = env.secret(TANG_KEYS_SECRET).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?.to_string();
-    let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let sig = parsed.get("sig").ok_or(StatusCode::INTERNAL_SERVER_ERROR)?.to_string();
-    let exc = parsed.get("exc").ok_or(StatusCode::INTERNAL_SERVER_ERROR)?.to_string();
-    TangyLib::init(KeySource::Vector(&vec![sig.as_str(), exc.as_str()])).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    load_tangy_from_json(&raw).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// Handles `GET /adv`.
@@ -228,6 +285,71 @@ mod tests {
     fn test_parse_cidr_list_trims_surrounding_whitespace() {
         let allowed = parse_cidr_list("  203.0.113.0/24 ,198.51.100.0/24  ");
         assert_eq!(allowed.len(), 2);
+    }
+
+    #[test]
+    fn test_check_cidr_list_accepts_every_valid_entry() {
+        assert!(check_cidr_list("203.0.113.0/24, 198.51.100.0/24").is_ok());
+    }
+
+    #[test]
+    fn test_check_cidr_list_rejects_a_single_bad_entry_even_among_good_ones() {
+        assert!(check_cidr_list("203.0.113.0/24, not-a-cidr").is_err());
+    }
+
+    #[test]
+    fn test_check_cidr_list_rejects_empty_input() {
+        assert!(check_cidr_list("").is_err());
+        assert!(check_cidr_list("   ").is_err());
+    }
+
+    #[test]
+    fn test_load_tangy_from_json_rejects_malformed_json() {
+        assert!(load_tangy_from_json("not json").is_err());
+    }
+
+    #[test]
+    fn test_load_tangy_from_json_rejects_a_missing_sig_or_exc_key() {
+        assert!(load_tangy_from_json(r#"{"exc":{}}"#).is_err());
+        assert!(load_tangy_from_json(r#"{"sig":{}}"#).is_err());
+    }
+
+    /// A freshly generated, genuinely valid combined `{"sig": ..., "exc":
+    /// ...}` key set, labelled by each key's own `alg` the same way
+    /// `keygen` does.
+    fn valid_key_set_json() -> serde_json::Value {
+        let (mut sig, mut exc) = (None, None);
+        for key in tangy_lib::create_new_key_set() {
+            let parsed: serde_json::Value = serde_json::from_str(&key).expect("tangy-lib must produce valid JSON");
+            match parsed.get("alg").and_then(serde_json::Value::as_str) {
+                Some("ES512") => sig = Some(parsed),
+                Some("ECMR") => exc = Some(parsed),
+                other => panic!("unexpected key algorithm: {other:?}"),
+            }
+        }
+        serde_json::json!({ "sig": sig.expect("a signing key"), "exc": exc.expect("an exchange key") })
+    }
+
+    #[test]
+    fn test_check_tangy_keys_accepts_a_genuinely_valid_key_set() {
+        // Also the test that GENERATOR_X/GENERATOR_Y are themselves valid:
+        // if they weren't, rec()'s own conversion of the dummy request
+        // body would panic before ever reaching the exchange key's check.
+        assert!(check_tangy_keys(&valid_key_set_json().to_string()).is_ok());
+    }
+
+    #[test]
+    fn test_check_tangy_keys_rejects_a_corrupted_exchange_key_even_with_a_valid_signing_key() {
+        let mut keys = valid_key_set_json();
+        // A zero scalar: the right length, but out of a private key's
+        // valid range, so load_tangy_from_json alone (which never
+        // exercises the exchange key) would accept this.
+        keys["exc"]["d"] = serde_json::Value::String(base64ct::Base64UrlUnpadded::encode_string(&[0u8; 66]));
+        assert!(load_tangy_from_json(&keys.to_string()).is_ok());
+        // tangy-lib reaches a bare .unwrap() on this, same as check-key's
+        // own binary sees, so this runs under catch_unwind too.
+        let result = std::panic::catch_unwind(|| check_tangy_keys(&keys.to_string()));
+        assert!(matches!(result, Ok(Err(_)) | Err(_)));
     }
 
     #[test]
