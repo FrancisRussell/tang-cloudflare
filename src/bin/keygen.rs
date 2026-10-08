@@ -26,8 +26,8 @@ fn main() -> ExitCode {
         // `create_new_key_set`'s return order, so a future reordering
         // there can't silently swap which key ends up under which name.
         match parsed.get("alg").and_then(Value::as_str) {
-            Some("ES512") => sig = Some(parsed),
-            Some("ECMR") => exc = Some(parsed),
+            Some(tang_cloudflare::SIGNING_KEY_ALG) => sig = Some(parsed),
+            Some(tang_cloudflare::EXCHANGE_KEY_ALG) => exc = Some(parsed),
             other => {
                 eprintln!("unexpected key algorithm: {other:?}");
                 return ExitCode::FAILURE;

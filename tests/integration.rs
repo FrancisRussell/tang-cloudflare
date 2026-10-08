@@ -53,6 +53,10 @@ const JOSE_JSON: &str = "application/jose+json";
 /// reason as `JOSE_JSON`.
 const JWK_JSON: &str = "application/jwk+json";
 
+/// `ALLOWED_CIDRS_KV`'s key in the Worker's own KV store. Duplicated for
+/// the same reason as `JOSE_JSON`.
+const ALLOWED_CIDRS_KV_KEY: &str = "cidrs";
+
 /// The CIDR this run's `ALLOWED_CIDRS_KV` is seeded with, and an address
 /// inside and outside it.
 const ALLOWED_CIDR: &str = "203.0.113.50/32";
@@ -167,7 +171,7 @@ fn seed_allowed_cidrs_kv(dir: &Path, config_path: &Path) {
             "kv",
             "key",
             "put",
-            "cidrs",
+            ALLOWED_CIDRS_KV_KEY,
             ALLOWED_CIDR,
             "--binding=ALLOWED_CIDRS_KV",
             "--local",

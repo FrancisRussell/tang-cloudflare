@@ -116,6 +116,15 @@ const JWK_JSON: &str = "application/jwk+json";
 /// apart silently.
 const KID_PARAM: &str = "kid";
 
+/// The JWA (RFC 7518) algorithm identifier tangy-lib gives the ES512
+/// signing key, used to tell it apart from the exchange key in a freshly
+/// generated key set.
+pub const SIGNING_KEY_ALG: &str = "ES512";
+/// The JWA (RFC 7518) algorithm identifier tangy-lib gives the ECMR
+/// exchange key, used to tell it apart from the signing key in a freshly
+/// generated key set.
+pub const EXCHANGE_KEY_ALG: &str = "ECMR";
+
 /// A `Headers` with a single `content-type` entry set to `value`.
 fn content_type_headers(value: &str) -> Headers {
     let headers = Headers::new();
@@ -136,12 +145,9 @@ pub fn load_tangy_from_json(raw: &str) -> std::result::Result<TangyLib, String> 
 
 /// The P-521 curve's generator point, in the same JWK coordinate encoding
 /// as a request body. Used below purely as a throwaway but genuinely
-/// on-curve point: its value doesn't matter, only that it's valid, so
-/// rather than transcribe the published constant (FIPS 186-4 / SP 800-186
-/// give it in hex, risking a transcription error in a 521-bit literal),
-/// this was read off `p521::ProjectivePoint::generator()` directly, the
-/// same crate tangy-lib itself uses, via a throwaway `cargo run --example`
-/// (not kept in this repo).
+/// on-curve point: its value doesn't matter, only that it's valid. Read
+/// off `p521::ProjectivePoint::generator()` rather than transcribed from
+/// a spec, avoiding a transcription error in a 521-bit literal.
 const GENERATOR_X: &str = "AMaFjga3BATpzZ4-y2YjlbRCnGSBOQU_tSH4KK9ga009uqFLXnfv51ko_h3BJ6L_qN4zSLPBhWpCm_l-fjHC5b1m";
 const GENERATOR_Y: &str = "ARg5KWp4mjvABFyKX7QsfRvZmPVESVebRGgXr70XJz5mLJfucple9CZAxVC5AT-tB2E1PHCGonLCQIi-lHaf0WZQ";
 
@@ -322,8 +328,8 @@ mod tests {
         for key in tangy_lib::create_new_key_set() {
             let parsed: serde_json::Value = serde_json::from_str(&key).expect("tangy-lib must produce valid JSON");
             match parsed.get("alg").and_then(serde_json::Value::as_str) {
-                Some("ES512") => sig = Some(parsed),
-                Some("ECMR") => exc = Some(parsed),
+                Some(SIGNING_KEY_ALG) => sig = Some(parsed),
+                Some(EXCHANGE_KEY_ALG) => exc = Some(parsed),
                 other => panic!("unexpected key algorithm: {other:?}"),
             }
         }
