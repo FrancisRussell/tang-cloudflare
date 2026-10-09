@@ -41,9 +41,9 @@ const ALLOWED_CIDRS_KV_BINDING: &str = "ALLOWED_CIDRS_KV";
 /// The single key `ALLOWED_CIDRS_KV` is read and written under.
 const ALLOWED_CIDRS_KV_KEY: &str = "cidrs";
 
-/// Secret holding both Tang keys as one JSON object, `{"sig": {...JWK...},
-/// "exc": {...JWK...}}`, so it's set with a single direct paste rather
-/// than assembled by hand from two separate values.
+/// Secret holding every Tang key generation as one JSON object (see
+/// `TangKeys`), so it's set with a single direct paste rather than
+/// assembled by hand from separate values.
 const TANG_KEYS_SECRET: &str = "TANG_KEYS";
 
 /// The request's `CF-Connecting-IP` header, if present.
@@ -132,15 +132,70 @@ fn content_type_headers(value: &str) -> Headers {
     headers
 }
 
-/// Parses the combined `{"sig": ..., "exc": ...}` JSON `TANG_KEYS` and
-/// `check-key` both expect, and builds a `TangyLib` from it. Shared so
-/// there's one parsing/initialization path for both: this project's own
-/// JSON-shape checks, plus whatever `TangyLib::init` itself validates.
-pub fn load_tangy_from_json(raw: &str) -> std::result::Result<TangyLib, String> {
-    let parsed: serde_json::Value = serde_json::from_str(raw).map_err(|e| format!("not valid JSON: {e}"))?;
-    let sig = parsed.get("sig").ok_or("missing \"sig\" key")?.to_string();
-    let exc = parsed.get("exc").ok_or("missing \"exc\" key")?.to_string();
-    TangyLib::init(KeySource::Vector(&vec![sig.as_str(), exc.as_str()])).map_err(|e| e.to_string())
+/// One generation of Tang keys, generated and retired as a unit since
+/// `sig`+`exc` are always minted together in one `keygen`/`rotate` call.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct KeyGeneration {
+    pub sig: MyJwkEcKey,
+    pub exc: MyJwkEcKey,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// The `TANG_KEYS` secret's JSON shape: exactly one advertised generation
+/// (`current`), plus however many retired generations are kept only so an
+/// already-bound disk can keep completing `/rec` after a rotation.
+/// `retired` is newest-first, so pruning the oldest is a pop from the
+/// back.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct TangKeys {
+    pub current: KeyGeneration,
+    #[serde(default)]
+    pub retired: Vec<KeyGeneration>,
+}
+
+impl TangKeys {
+    /// Every generation, current first: the full set `/rec` must serve.
+    pub fn generations(&self) -> impl Iterator<Item = &KeyGeneration> {
+        std::iter::once(&self.current).chain(self.retired.iter())
+    }
+}
+
+/// Parses the `TANG_KEYS` secret's JSON. Shared so there's one parsing
+/// path for the Worker itself, `check-key`, and `keygen`'s subcommands.
+pub fn parse_tang_keys(raw: &str) -> std::result::Result<TangKeys, String> {
+    serde_json::from_str(raw).map_err(|e| format!("not valid JSON: {e}"))
+}
+
+/// Serializes each generation's two keys back to the raw JWK JSON strings
+/// `TangyLib::init` takes.
+fn key_strings<'a>(generations: impl Iterator<Item = &'a KeyGeneration>) -> std::result::Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for generation in generations {
+        out.push(serde_json::to_string(&generation.sig).map_err(|e| format!("signing key: {e}"))?);
+        out.push(serde_json::to_string(&generation.exc).map_err(|e| format!("exchange key: {e}"))?);
+    }
+    Ok(out)
+}
+
+/// Builds the `TangyLib` that serves `/adv`: only the current generation,
+/// so retired generations are never advertised. A separate `TangyLib`
+/// from `build_rec_tangy`'s, rather than one shared instance with a
+/// visibility flag, since tangy-lib itself has no advertised-vs-hidden
+/// concept: every key it's given is advertised unconditionally.
+fn build_adv_tangy(keys: &TangKeys) -> std::result::Result<TangyLib, String> {
+    let adv_keys = key_strings(std::iter::once(&keys.current))?;
+    let adv_refs: Vec<&str> = adv_keys.iter().map(String::as_str).collect();
+    TangyLib::init(KeySource::Vector(&adv_refs)).map_err(|e| e.to_string())
+}
+
+/// Builds the `TangyLib` that serves `/rec`: every generation, current
+/// and retired, so a disk still bound to a retired key keeps unlocking.
+fn build_rec_tangy(keys: &TangKeys) -> std::result::Result<TangyLib, String> {
+    let rec_keys = key_strings(keys.generations())?;
+    let rec_refs: Vec<&str> = rec_keys.iter().map(String::as_str).collect();
+    TangyLib::init(KeySource::Vector(&rec_refs)).map_err(|e| e.to_string())
 }
 
 /// The P-521 curve's generator point, in the same JWK coordinate encoding
@@ -151,31 +206,38 @@ pub fn load_tangy_from_json(raw: &str) -> std::result::Result<TangyLib, String> 
 const GENERATOR_X: &str = "AMaFjga3BATpzZ4-y2YjlbRCnGSBOQU_tSH4KK9ga009uqFLXnfv51ko_h3BJ6L_qN4zSLPBhWpCm_l-fjHC5b1m";
 const GENERATOR_Y: &str = "ARg5KWp4mjvABFyKX7QsfRvZmPVESVebRGgXr70XJz5mLJfucple9CZAxVC5AT-tB2E1PHCGonLCQIi-lHaf0WZQ";
 
-/// Validates a combined Tang key-set JSON more thoroughly than
-/// `load_tangy_from_json` alone: that only exercises the signing key's
-/// private scalar (via `TangyLib::init`'s precomputed advertisement). The
-/// exchange key's private scalar is never converted until an actual
-/// `/rec` request names it by its own `kid`, so this exercises that path
-/// too, with a throwaway on-curve point standing in for the client's
-/// half of the exchange. Used by `check-key`; the Worker itself has no
-/// reason to validate its own key on every request.
+/// Validates a `TANG_KEYS` JSON more thoroughly than `parse_tang_keys`
+/// alone. Checks every generation's exchange key: `parse_tang_keys` and
+/// `TangyLib::init` only ever exercise a signing key's private scalar
+/// (via the precomputed advertisement); an exchange key's private scalar
+/// is never converted until an actual `/rec` request names it by its own
+/// `kid`, so this exercises that path too, for every generation, with a
+/// throwaway on-curve point standing in for the client's half of the
+/// exchange. Used by `check-key`; the Worker itself has no reason to run
+/// this check on every request.
 pub fn check_tangy_keys(raw: &str) -> std::result::Result<(), String> {
-    let tangy = load_tangy_from_json(raw)?;
-    let parsed: serde_json::Value = serde_json::from_str(raw).map_err(|e| format!("not valid JSON: {e}"))?;
-    let exc = parsed.get("exc").ok_or("missing \"exc\" key")?.to_string();
-    let exc: MyJwkEcKey = serde_json::from_str(&exc).map_err(|e| format!("\"exc\" is not a valid JWK: {e}"))?;
+    let keys = parse_tang_keys(raw)?;
+    let rec = build_rec_tangy(&keys)?;
     let dummy_request = format!(r#"{{"kty":"EC","crv":"P-521","x":"{GENERATOR_X}","y":"{GENERATOR_Y}"}}"#);
-    tangy.rec(&exc.thumbprint(), &dummy_request).map(|_| ()).map_err(|e| format!("exchange key rejected: {e}"))
+    for generation in keys.generations() {
+        rec.rec(&generation.exc.thumbprint(), &dummy_request)
+            .map(|_| ())
+            .map_err(|e| format!("exchange key rejected (created {}): {e}", generation.created_at))?;
+    }
+    Ok(())
 }
 
-/// Loads both Tang keys from the combined `TANG_KEYS` secret and builds a
-/// `TangyLib` for this request. Key loading is just JSON parsing, not real
-/// computation, so there's no benefit to caching it across
-/// requests/isolates. Discards `load_tangy_from_json`'s specific error,
-/// rather than exposing key-handling details to the client.
-fn load_tangy(env: &Env) -> std::result::Result<TangyLib, StatusCode> {
+/// Parses every Tang key generation from the `TANG_KEYS` secret for this
+/// request. Key loading is just JSON parsing, not real computation, so
+/// there's no benefit to caching it across requests/isolates. Discards
+/// the specific parse error, rather than exposing key-handling details
+/// to the client. Building the actual `TangyLib` is left to the caller,
+/// so each handler only pays for the one it needs (building either one
+/// performs a real signature per signing key, via `TangyLib::init`'s own
+/// precomputed advertisement).
+fn load_tang_keys(env: &Env) -> std::result::Result<TangKeys, StatusCode> {
     let raw = env.secret(TANG_KEYS_SECRET).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?.to_string();
-    load_tangy_from_json(&raw).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    parse_tang_keys(&raw).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// Handles `GET /adv`.
@@ -183,11 +245,12 @@ async fn handle_adv(req: Request, ctx: RouteContext<()>) -> Result<Response> {
     if !authorized(&req, &ctx.env).await {
         return error_response(StatusCode::FORBIDDEN);
     }
-    let tangy = match load_tangy(&ctx.env) {
-        Ok(t) => t,
+    let keys = match load_tang_keys(&ctx.env) {
+        Ok(k) => k,
         Err(status) => return error_response(status),
     };
-    match tangy.adv(None) {
+    let Ok(adv) = build_adv_tangy(&keys) else { return error_response(StatusCode::INTERNAL_SERVER_ERROR) };
+    match adv.adv(None) {
         Ok(body) => Ok(Response::ok(body)?.with_headers(content_type_headers(JOSE_JSON))),
         Err(_) => error_response(StatusCode::INTERNAL_SERVER_ERROR),
     }
@@ -230,11 +293,12 @@ async fn handle_rec(mut req: Request, ctx: RouteContext<()>) -> Result<Response>
     if !looks_like_ec_point(&body) {
         return error_response(StatusCode::BAD_REQUEST);
     }
-    let tangy = match load_tangy(&ctx.env) {
-        Ok(t) => t,
+    let keys = match load_tang_keys(&ctx.env) {
+        Ok(k) => k,
         Err(status) => return error_response(status),
     };
-    match tangy.rec(&kid, &body) {
+    let Ok(rec) = build_rec_tangy(&keys) else { return error_response(StatusCode::INTERNAL_SERVER_ERROR) };
+    match rec.rec(&kid, &body) {
         Ok(body) => Ok(Response::ok(body)?.with_headers(content_type_headers(JWK_JSON))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => error_response(StatusCode::NOT_FOUND),
         Err(_) => error_response(StatusCode::INTERNAL_SERVER_ERROR),
@@ -310,20 +374,26 @@ mod tests {
     }
 
     #[test]
-    fn test_load_tangy_from_json_rejects_malformed_json() {
-        assert!(load_tangy_from_json("not json").is_err());
+    fn test_parse_tang_keys_rejects_malformed_json() {
+        assert!(parse_tang_keys("not json").is_err());
     }
 
     #[test]
-    fn test_load_tangy_from_json_rejects_a_missing_sig_or_exc_key() {
-        assert!(load_tangy_from_json(r#"{"exc":{}}"#).is_err());
-        assert!(load_tangy_from_json(r#"{"sig":{}}"#).is_err());
+    fn test_parse_tang_keys_rejects_a_missing_current_generation() {
+        assert!(parse_tang_keys("{}").is_err());
     }
 
-    /// A freshly generated, genuinely valid combined `{"sig": ..., "exc":
-    /// ...}` key set, labelled by each key's own `alg` the same way
-    /// `keygen` does.
-    fn valid_key_set_json() -> serde_json::Value {
+    #[test]
+    fn test_parse_tang_keys_rejects_a_generation_missing_sig_exc_or_created_at() {
+        assert!(parse_tang_keys(r#"{"current":{"exc":{},"created_at":"2024-01-01T00:00:00Z"}}"#).is_err());
+        assert!(parse_tang_keys(r#"{"current":{"sig":{},"created_at":"2024-01-01T00:00:00Z"}}"#).is_err());
+        assert!(parse_tang_keys(r#"{"current":{"sig":{},"exc":{}}}"#).is_err());
+    }
+
+    /// A freshly generated, genuinely valid key generation with an
+    /// explicit `created_at`, labelled by each key's own `alg` the same
+    /// way `keygen` does.
+    fn valid_key_generation_json_at(created_at: chrono::DateTime<chrono::Utc>) -> serde_json::Value {
         let (mut sig, mut exc) = (None, None);
         for key in tangy_lib::create_new_key_set() {
             let parsed: serde_json::Value = serde_json::from_str(&key).expect("tangy-lib must produce valid JSON");
@@ -333,7 +403,22 @@ mod tests {
                 other => panic!("unexpected key algorithm: {other:?}"),
             }
         }
-        serde_json::json!({ "sig": sig.expect("a signing key"), "exc": exc.expect("an exchange key") })
+        serde_json::json!({
+            "sig": sig.expect("a signing key"),
+            "exc": exc.expect("an exchange key"),
+            "created_at": created_at.to_rfc3339(),
+        })
+    }
+
+    /// As `valid_key_generation_json_at`, stamped with the current time.
+    fn valid_key_generation_json() -> serde_json::Value {
+        valid_key_generation_json_at(chrono::Utc::now())
+    }
+
+    /// A genuinely valid `TANG_KEYS` JSON with one current generation and
+    /// no retired ones.
+    fn valid_tang_keys_json() -> serde_json::Value {
+        serde_json::json!({ "current": valid_key_generation_json(), "retired": [] })
     }
 
     #[test]
@@ -341,21 +426,61 @@ mod tests {
         // Also the test that GENERATOR_X/GENERATOR_Y are themselves valid:
         // if they weren't, rec()'s own conversion of the dummy request
         // body would panic before ever reaching the exchange key's check.
-        assert!(check_tangy_keys(&valid_key_set_json().to_string()).is_ok());
+        assert!(check_tangy_keys(&valid_tang_keys_json().to_string()).is_ok());
     }
 
     #[test]
-    fn test_check_tangy_keys_rejects_a_corrupted_exchange_key_even_with_a_valid_signing_key() {
-        let mut keys = valid_key_set_json();
+    fn test_check_tangy_keys_rejects_a_corrupted_current_exchange_key() {
+        let mut keys = valid_tang_keys_json();
         // A zero scalar: the right length, but out of a private key's
-        // valid range, so load_tangy_from_json alone (which never
-        // exercises the exchange key) would accept this.
-        keys["exc"]["d"] = serde_json::Value::String(base64ct::Base64UrlUnpadded::encode_string(&[0u8; 66]));
-        assert!(load_tangy_from_json(&keys.to_string()).is_ok());
+        // valid range, so parse_tang_keys alone (which never exercises
+        // the exchange key) would accept this.
+        keys["current"]["exc"]["d"] = serde_json::Value::String(base64ct::Base64UrlUnpadded::encode_string(&[0u8; 66]));
+        assert!(parse_tang_keys(&keys.to_string()).is_ok());
         // tangy-lib reaches a bare .unwrap() on this, same as check-key's
         // own binary sees, so this runs under catch_unwind too.
         let result = std::panic::catch_unwind(|| check_tangy_keys(&keys.to_string()));
         assert!(matches!(result, Ok(Err(_)) | Err(_)));
+    }
+
+    #[test]
+    fn test_check_tangy_keys_rejects_a_corrupted_retired_exchange_key() {
+        let mut keys = valid_tang_keys_json();
+        let mut retired = valid_key_generation_json();
+        retired["exc"]["d"] = serde_json::Value::String(base64ct::Base64UrlUnpadded::encode_string(&[0u8; 66]));
+        keys["retired"] = serde_json::json!([retired]);
+        let result = std::panic::catch_unwind(|| check_tangy_keys(&keys.to_string()));
+        assert!(matches!(result, Ok(Err(_)) | Err(_)));
+    }
+
+    #[test]
+    fn test_build_tangy_advertises_only_the_current_generation() {
+        let mut keys_json = valid_tang_keys_json();
+        keys_json["retired"] = serde_json::json!([valid_key_generation_json()]);
+        let keys = parse_tang_keys(&keys_json.to_string()).expect("a valid TangKeys");
+        let adv = build_adv_tangy(&keys).expect("a valid key set must build");
+        let adv_body: serde_json::Value =
+            serde_json::from_str(&adv.adv(None).expect("adv must succeed")).expect("adv body must be JSON");
+        let payload = base64ct::Base64Url::decode_vec(adv_body["payload"].as_str().expect("adv body has a payload"))
+            .expect("adv payload must be valid base64url");
+        let payload: serde_json::Value = serde_json::from_slice(&payload).expect("adv payload must be JSON");
+        let advertised_keys = payload["keys"].as_array().expect("adv payload has a keys array");
+        assert_eq!(advertised_keys.len(), 2, "only the current generation's 2 keys should be advertised");
+    }
+
+    #[test]
+    fn test_build_tangy_rec_can_still_resolve_a_retired_generation() {
+        let mut keys_json = valid_tang_keys_json();
+        let retired = valid_key_generation_json();
+        let retired_thumbprint = {
+            let exc: MyJwkEcKey = serde_json::from_value(retired["exc"].clone()).expect("exc must parse");
+            exc.thumbprint()
+        };
+        keys_json["retired"] = serde_json::json!([retired]);
+        let keys = parse_tang_keys(&keys_json.to_string()).expect("a valid TangKeys");
+        let rec = build_rec_tangy(&keys).expect("a valid key set must build");
+        let dummy_request = format!(r#"{{"kty":"EC","crv":"P-521","x":"{GENERATOR_X}","y":"{GENERATOR_Y}"}}"#);
+        assert!(rec.rec(&retired_thumbprint, &dummy_request).is_ok());
     }
 
     #[test]

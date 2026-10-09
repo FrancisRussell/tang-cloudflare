@@ -62,10 +62,10 @@ npm install
 ### 3. Generate the Tang keys
 
 ```sh
-cargo run --release --bin keygen > tang-keys.json
+cargo run --bin keygen -- generate > tang-keys.json
 ```
 
-This generates the two keys Tang needs and prints them together as one JSON
+This generates the current generation's two keys and prints them as one JSON
 file. There's no way to recover them if they're lost, so before anything
 else:
 
@@ -79,9 +79,31 @@ else:
    name.
 3. Delete the local file.
 
-To rotate the keys later, repeat this whole process. It replaces the key set
-entirely rather than extending it, so any machine still bound to the old
-keys will need rebinding.
+To rotate the keys later:
+
+```sh
+cargo run --bin keygen -- rotate tang-keys.json > rotated-keys.json
+```
+
+This retires the current generation (kept so a machine already bound to it
+can keep unlocking) and generates a new one as the file's current
+generation. Only the new current generation is ever advertised; retired
+ones are still accepted by `/rec`. Re-run steps 1 and 2 above on the new
+file once you're ready to rebind to it.
+
+Once a retired generation is confirmed unused (every machine bound to it has
+been rebound), remove it:
+
+```sh
+cargo run --bin keygen -- prune tang-keys.json > pruned-keys.json
+```
+
+Defaults to removing the single oldest retired generation; `--keep <N>`
+(keep only the N newest retired generations, removing the rest),
+`--older-than <DURATION>` (e.g. `1y`, `6months`), or `--thumbprint
+<THUMBPRINT>` select differently. Every `keygen` command prints each
+generation's thumbprint to stderr, since that's the only identifier `prune
+--thumbprint` takes.
 
 ### 4. Create the allowlist's KV namespace
 

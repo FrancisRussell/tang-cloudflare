@@ -11,13 +11,14 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 base64ct = { version = "1", default-features = false, features = ["alloc"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+clap = { version = "4", default-features = false, features = ["derive", "help", "std", "usage", "wrap_help", "suggestions"], optional = true }
 console_error_panic_hook = "0.1"
-# tangy-lib's own OsRng usage pulls in getrandom transitively; its "js"
-# feature is required to even compile for wasm32-unknown-unknown, which
-# otherwise hard-errors (see getrandom's own compile_error!).
 getrandom = { version = "0.2", default-features = false, features = ["js"] }
 http = { version = "1", default-features = false, features = ["std"] }
+humantime = { version = "2", optional = true }
 ipnetwork = { version = "0.20", default-features = false }
+serde = { version = "1", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1", default-features = false, features = ["std"] }
 tangy-lib = "0.1"
 worker = { version = "0.8", default-features = false }
@@ -27,11 +28,15 @@ ctrlc = "3.5.2"
 elliptic-curve = { version = "0.13", default-features = false, features = ["arithmetic", "sec1"] }
 nix = { version = "0.31.3", default-features = false, features = ["signal"] }
 p521 = { version = "0.13", default-features = false, features = ["arithmetic", "getrandom"] }
-serde = { version = "1", default-features = false, features = ["derive"] }
 sha2 = { version = "0.10", default-features = false, features = ["std"] }
 ureq = { version = "2", default-features = false }
 
 [features]
+default = ["cli"]
+# keygen's own dependencies. Not needed by the Worker itself (the wasm
+# build passes --no-default-features; see wrangler.toml), only by that
+# one native binary.
+cli = ["dep:clap", "dep:humantime"]
 # Gates tests/integration.rs; see that file's header comment.
 integration-tests = []
 

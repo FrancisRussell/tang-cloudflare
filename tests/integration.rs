@@ -159,11 +159,11 @@ fn write_dev_vars(dir: &Path, tang_keys_json: &str) {
         .expect("failed to write .dev.vars");
 }
 
-/// Runs the real `keygen` binary, already built by Cargo as a prerequisite
-/// of this test binary, and returns its stdout: the combined `{"sig": ...,
-/// "exc": ...}` JSON the `TANG_KEYS` secret expects.
+/// Runs the real `keygen generate` command, already built by Cargo as a
+/// prerequisite of this test binary, and returns its stdout: the JSON the
+/// `TANG_KEYS` secret expects.
 fn generate_test_tang_keys() -> String {
-    let output = Command::new(env!("CARGO_BIN_EXE_keygen")).output().expect("failed to run keygen");
+    let output = Command::new(env!("CARGO_BIN_EXE_keygen")).arg("generate").output().expect("failed to run keygen");
     assert!(output.status.success(), "keygen failed: {}", String::from_utf8_lossy(&output.stderr));
     String::from_utf8(output.stdout).expect("keygen's output must be valid UTF-8")
 }
@@ -193,7 +193,7 @@ impl WranglerDev {
         assert!(status.success(), "cargo install worker-build failed");
 
         let status = Command::new("worker-build")
-            .arg("--release")
+            .args(["--release", "--no-default-features"])
             .current_dir(PROJECT_DIR)
             .status()
             .expect("failed to run worker-build");

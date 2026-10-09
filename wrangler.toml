@@ -5,8 +5,10 @@ compatibility_date = "2026-09-22"
 [build]
 # worker-build is a Rust tool (not an npm package), pinned to the version
 # matching the `worker` crate in Cargo.toml so builds don't drift with
-# releases.
-command = "cargo install -q --locked worker-build@0.8.6 && worker-build --release"
+# releases. --no-default-features drops the "cli" feature, which pulls in
+# clap/humantime for the keygen binary; that binary is never part of this
+# build, so there's no reason to compile its dependencies here.
+command = "cargo install -q --locked worker-build@0.8.6 && worker-build --release --no-default-features"
 
 # Created once with `wrangler kv namespace create tang-allowed-cidrs`; see
 # README.md. The id below isn't sensitive (an opaque per-account
@@ -27,7 +29,6 @@ id = "REPLACE_WITH_NAMESPACE_ID"
 # unless there's a concrete reason to widen it. `npm run get-allowlist`
 # reads back the current value.
 #
-# TANG_KEYS is a secret, set with `npm run upload-key`:
-#   {"sig": {...JWK...}, "exc": {...JWK...}}, the same JSON shape as the
-#   password-manager backup, so this is a direct paste with nothing to
-#   split by hand
+# TANG_KEYS is a secret, set with `npm run upload-key`, in the same JSON
+# shape `keygen` prints and the password-manager backup holds, so this is
+# a direct paste with nothing to assemble by hand
