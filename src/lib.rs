@@ -206,17 +206,75 @@ fn build_rec_tangy(keys: &TangKeys) -> std::result::Result<TangyLib, String> {
 const GENERATOR_X: &str = "AMaFjga3BATpzZ4-y2YjlbRCnGSBOQU_tSH4KK9ga009uqFLXnfv51ko_h3BJ6L_qN4zSLPBhWpCm_l-fjHC5b1m";
 const GENERATOR_Y: &str = "ARg5KWp4mjvABFyKX7QsfRvZmPVESVebRGgXr70XJz5mLJfucple9CZAxVC5AT-tB2E1PHCGonLCQIi-lHaf0WZQ";
 
+/// Checks that `retired` is strictly newest-first, the invariant
+/// `TangKeys` documents and `prune`'s default/`--keep` removal relies on
+/// to drop the right end of the list. Doesn't compare `current` against
+/// `retired`: reverting to an older generation (restoring it as current
+/// and retiring whatever was current instead) can legitimately leave
+/// `current` older than some retired generations, so that's not itself
+/// a sign of corruption.
+fn check_retired_order(keys: &TangKeys) -> std::result::Result<(), String> {
+    for (index, (newer, older)) in keys.retired.iter().zip(keys.retired.iter().skip(1)).enumerate() {
+        if older.created_at >= newer.created_at {
+            return Err(format!(
+                "retired[{}] (created {}) is not older than retired[{index}] (created {})",
+                index + 1,
+                older.created_at,
+                newer.created_at
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Checks that `key`'s public point (`x`, `y`) is actually on the P-521
+/// curve and is the point its own private scalar `d` derives (i.e.
+/// `(x, y) == d * G`). Neither `TangyLib::init` nor `rec` ever read a
+/// key's public point at all (only `d` is used, to sign or to perform
+/// the exchange), so a wrong or off-curve `(x, y)` would otherwise pass
+/// every other check in this file and still be echoed verbatim into
+/// `/adv`'s payload.
+fn check_key_point_matches_scalar(key: &MyJwkEcKey) -> std::result::Result<(), String> {
+    let x = base64ct::Base64UrlUnpadded::decode_vec(&key.x).map_err(|e| format!("x coordinate: {e}"))?;
+    let y = base64ct::Base64UrlUnpadded::decode_vec(&key.y).map_err(|e| format!("y coordinate: {e}"))?;
+    let mut sec1 = Vec::with_capacity(1 + x.len() + y.len());
+    sec1.push(0x04);
+    sec1.extend_from_slice(&x);
+    sec1.extend_from_slice(&y);
+    let claimed = p521::PublicKey::from_sec1_bytes(&sec1)
+        .map_err(|_| "public point is not a valid, on-curve P-521 point".to_string())?;
+
+    let d = key.d.as_deref().ok_or("missing private scalar \"d\"")?;
+    let d = base64ct::Base64UrlUnpadded::decode_vec(d).map_err(|e| format!("d: {e}"))?;
+    let secret = p521::SecretKey::from_slice(&d).map_err(|_| "private scalar \"d\" is invalid".to_string())?;
+
+    if secret.public_key() != claimed {
+        return Err("public point does not match the private scalar".to_string());
+    }
+    Ok(())
+}
+
 /// Validates a `TANG_KEYS` JSON more thoroughly than `parse_tang_keys`
-/// alone. Checks every generation's exchange key: `parse_tang_keys` and
-/// `TangyLib::init` only ever exercise a signing key's private scalar
-/// (via the precomputed advertisement); an exchange key's private scalar
-/// is never converted until an actual `/rec` request names it by its own
-/// `kid`, so this exercises that path too, for every generation, with a
-/// throwaway on-curve point standing in for the client's half of the
-/// exchange. Used by `check-key`; the Worker itself has no reason to run
-/// this check on every request.
+/// alone. Checks `retired`'s order (see `check_retired_order`), every
+/// key's public point against its own private scalar (see
+/// `check_key_point_matches_scalar`), then every generation's exchange
+/// key: `parse_tang_keys` and `TangyLib::init` only ever exercise a
+/// signing key's private scalar (via the precomputed advertisement); an
+/// exchange key's private scalar is never converted until an actual
+/// `/rec` request names it by its own `kid`, so this exercises that path
+/// too, for every generation, with a throwaway on-curve point standing
+/// in for the client's half of the exchange. Used by `check-key`; the
+/// Worker itself has no reason to run any of these checks on every
+/// request.
 pub fn check_tangy_keys(raw: &str) -> std::result::Result<(), String> {
     let keys = parse_tang_keys(raw)?;
+    check_retired_order(&keys)?;
+    for generation in keys.generations() {
+        check_key_point_matches_scalar(&generation.sig)
+            .map_err(|e| format!("signing key rejected (created {}): {e}", generation.created_at))?;
+        check_key_point_matches_scalar(&generation.exc)
+            .map_err(|e| format!("exchange key rejected (created {}): {e}", generation.created_at))?;
+    }
     let rec = build_rec_tangy(&keys)?;
     let dummy_request = format!(r#"{{"kty":"EC","crv":"P-521","x":"{GENERATOR_X}","y":"{GENERATOR_Y}"}}"#);
     for generation in keys.generations() {
@@ -430,6 +488,30 @@ mod tests {
     }
 
     #[test]
+    fn test_check_tangy_keys_rejects_a_point_off_curve() {
+        let mut keys = valid_tang_keys_json();
+        // Swapping x and y leaves well-formed, correct-length
+        // coordinates that are (overwhelmingly likely to be) off the
+        // curve.
+        let x = keys["current"]["exc"]["x"].clone();
+        let y = keys["current"]["exc"]["y"].clone();
+        keys["current"]["exc"]["x"] = y;
+        keys["current"]["exc"]["y"] = x;
+        assert!(check_tangy_keys(&keys.to_string()).is_err());
+    }
+
+    #[test]
+    fn test_check_tangy_keys_rejects_a_point_that_does_not_match_its_scalar() {
+        let mut keys = valid_tang_keys_json();
+        // Another genuinely valid key's point: on the curve, but not
+        // the point this key's own `d` actually derives.
+        let other = valid_key_generation_json();
+        keys["current"]["exc"]["x"] = other["exc"]["x"].clone();
+        keys["current"]["exc"]["y"] = other["exc"]["y"].clone();
+        assert!(check_tangy_keys(&keys.to_string()).is_err());
+    }
+
+    #[test]
     fn test_check_tangy_keys_rejects_a_corrupted_current_exchange_key() {
         let mut keys = valid_tang_keys_json();
         // A zero scalar: the right length, but out of a private key's
@@ -451,6 +533,44 @@ mod tests {
         keys["retired"] = serde_json::json!([retired]);
         let result = std::panic::catch_unwind(|| check_tangy_keys(&keys.to_string()));
         assert!(matches!(result, Ok(Err(_)) | Err(_)));
+    }
+
+    #[test]
+    fn test_check_tangy_keys_accepts_correctly_ordered_retired_generations() {
+        let now = chrono::Utc::now();
+        let mut keys = valid_tang_keys_json();
+        keys["retired"] = serde_json::json!([
+            valid_key_generation_json_at(now - chrono::Duration::hours(1)),
+            valid_key_generation_json_at(now - chrono::Duration::hours(2)),
+        ]);
+        assert!(check_tangy_keys(&keys.to_string()).is_ok());
+    }
+
+    #[test]
+    fn test_check_tangy_keys_rejects_retired_generations_out_of_order() {
+        let now = chrono::Utc::now();
+        let mut keys = valid_tang_keys_json();
+        // retired[1] is newer than retired[0], violating the
+        // newest-first invariant prune's default/--keep removal relies
+        // on.
+        keys["retired"] = serde_json::json!([
+            valid_key_generation_json_at(now - chrono::Duration::hours(2)),
+            valid_key_generation_json_at(now - chrono::Duration::hours(1)),
+        ]);
+        assert!(check_tangy_keys(&keys.to_string()).is_err());
+    }
+
+    #[test]
+    fn test_check_tangy_keys_accepts_a_current_older_than_a_retired_generation() {
+        // A legitimate revert: restoring an older generation as current
+        // and retiring whatever was current instead leaves `current`
+        // older than some retired generations. That's not corruption,
+        // so it must not be rejected.
+        let now = chrono::Utc::now();
+        let mut keys = valid_tang_keys_json();
+        keys["current"] = valid_key_generation_json_at(now - chrono::Duration::days(1));
+        keys["retired"] = serde_json::json!([valid_key_generation_json_at(now)]);
+        assert!(check_tangy_keys(&keys.to_string()).is_ok());
     }
 
     #[test]
