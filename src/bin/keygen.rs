@@ -8,6 +8,7 @@
 //   cargo run --bin keygen -- generate > tang-keys.json
 //   cargo run --bin keygen -- rotate tang-keys.json > rotated.json
 //   cargo run --bin keygen -- prune tang-keys.json > pruned.json
+//   cargo run --bin keygen -- list tang-keys.json
 // Paste the result into the password manager, then:
 //   wrangler secret put TANG_KEYS < tang-keys.json
 // Delete the local file once both copies exist.
@@ -20,7 +21,7 @@ use tang_cloudflare::{parse_tang_keys, KeyGeneration, TangKeys, EXCHANGE_KEY_ALG
 use tangy_lib::MyJwkEcKey;
 
 #[derive(Debug, Clone, Parser)]
-#[command(about = "Generates, rotates, and prunes tang-cloudflare's TANG_KEYS")]
+#[command(about = "Generates, rotates, prunes, and lists tang-cloudflare's TANG_KEYS")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -59,6 +60,11 @@ enum Command {
         #[arg(long, conflicts_with_all = ["keep", "older_than"])]
         thumbprint: Option<String>,
     },
+    /// List every generation's thumbprint, creation time, and note.
+    List {
+        /// Path to the existing `TANG_KEYS` JSON file.
+        file: PathBuf,
+    },
 }
 
 /// Generates a fresh signing/exchange key pair as a new `KeyGeneration`,
@@ -81,8 +87,8 @@ fn generate_key_generation(note: Option<&str>) -> Result<KeyGeneration, String> 
     Ok(KeyGeneration { sig, exc, created_at: chrono::Utc::now(), note: note.map(String::from) })
 }
 
-/// Reads and parses an existing `TANG_KEYS` JSON file, as `rotate` and
-/// `prune` both start from.
+/// Reads and parses an existing `TANG_KEYS` JSON file, as every
+/// command but `generate` starts from.
 fn read_tang_keys(path: &PathBuf) -> Result<TangKeys, String> {
     let raw = std::fs::read_to_string(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
     parse_tang_keys(&raw)
@@ -94,49 +100,33 @@ fn note_suffix(note: Option<&str>) -> String {
     note.map_or_else(String::new, |note| format!(" ({note})"))
 }
 
-/// Prints one generation's identifying info to stderr: its exchange
-/// key's thumbprint (the only identifier `prune --thumbprint` takes, and
+/// Formats one generation's identifying info: its exchange key's
+/// thumbprint (the only identifier `prune --thumbprint` takes, and
 /// otherwise only discoverable via a bound client's own pinned copy,
 /// e.g. `clevis luks list`'s `thp`), creation time, and note if any.
-fn describe_generation(label: &str, generation: &KeyGeneration) {
+fn describe_generation(label: &str, generation: &KeyGeneration) -> String {
     // created_at's Display impl includes however many subsecond digits
     // the system clock reported, down to nanoseconds; seconds is all a
     // human reading this needs.
     let created_at = generation.created_at.format("%Y-%m-%d %H:%M:%S UTC");
-    eprintln!(
+    format!(
         "{label}: thumbprint {}, created {created_at}{}",
         generation.exc.thumbprint(),
         note_suffix(generation.note.as_deref())
-    );
-}
-
-/// Prints every generation's identifying info to stderr, then a blank
-/// line, so the summary stays visually separate from the JSON that
-/// follows on stdout when both land on the same console.
-fn print_thumbprints(keys: &TangKeys) {
-    describe_generation("current", &keys.current);
-    for generation in &keys.retired {
-        describe_generation("retired", generation);
-    }
-    eprintln!();
+    )
 }
 
 /// Prints `keys` as pretty JSON to stdout, the common final step of
-/// every `keygen` command.
+/// `generate`, `rotate`, and `prune`.
 fn print_json(keys: &TangKeys) -> Result<(), String> {
     let text = serde_json::to_string_pretty(keys).map_err(|e| format!("failed to serialize key set: {e}"))?;
     println!("{text}");
     Ok(())
 }
 
-/// Implements `Command::Generate`. Prints its own plain confirmation
-/// rather than `print_thumbprints`' current/retired dump: with no
-/// rotation history yet, there's nothing for "current" to contrast
-/// against.
+/// Implements `Command::Generate`.
 fn generate(note: Option<&str>) -> Result<(), String> {
     let current = generate_key_generation(note)?;
-    eprintln!("Generated key with thumbprint {}{}", current.exc.thumbprint(), note_suffix(current.note.as_deref()));
-    eprintln!();
     print_json(&TangKeys { current, retired: Vec::new() })
 }
 
@@ -153,9 +143,7 @@ fn rotate_keys(keys: TangKeys, note: Option<&str>) -> Result<TangKeys, String> {
 /// the result.
 fn rotate(file: &PathBuf, note: Option<&str>) -> Result<(), String> {
     let keys = read_tang_keys(file)?;
-    let keys = rotate_keys(keys, note)?;
-    print_thumbprints(&keys);
-    print_json(&keys)
+    print_json(&rotate_keys(keys, note)?)
 }
 
 /// Which retired generations `prune` should remove. Built from
@@ -229,16 +217,29 @@ fn prune_keys(mut keys: TangKeys, selector: PruneSelector) -> Result<(TangKeys, 
 }
 
 /// Implements `Command::Prune`: reads `file`, prunes it, and prints the
-/// result.
+/// result. Reports which generations were removed on stderr, since
+/// once `file` is overwritten that's the only place this is still
+/// visible.
 fn prune(file: &PathBuf, selector: PruneSelector) -> Result<(), String> {
     let keys = read_tang_keys(file)?;
     let (keys, removed) = prune_keys(keys, selector)?;
     eprintln!("pruned {} retired generation(s):", removed.len());
     for generation in &removed {
-        describe_generation("pruned", generation);
+        eprintln!("{}", describe_generation("pruned", generation));
     }
-    print_thumbprints(&keys);
+    eprintln!();
     print_json(&keys)
+}
+
+/// Implements `Command::List`: prints every generation's identifying
+/// info from `file`, without modifying it.
+fn list(file: &PathBuf) -> Result<(), String> {
+    let keys = read_tang_keys(file)?;
+    println!("{}", describe_generation("current", &keys.current));
+    for generation in &keys.retired {
+        println!("{}", describe_generation("retired", generation));
+    }
+    Ok(())
 }
 
 fn main() -> ExitCode {
@@ -248,6 +249,7 @@ fn main() -> ExitCode {
         Command::Prune { file, keep, older_than, thumbprint } => {
             prune_selector(keep, older_than.as_deref(), thumbprint).and_then(|selector| prune(&file, selector))
         }
+        Command::List { file } => list(&file),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

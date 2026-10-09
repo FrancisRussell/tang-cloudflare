@@ -101,9 +101,12 @@ cargo run --bin keygen -- prune tang-keys.json > pruned-keys.json
 Defaults to removing the single oldest retired generation; `--keep <N>`
 (keep only the N newest retired generations, removing the rest),
 `--older-than <DURATION>` (e.g. `1y`, `6months`), or `--thumbprint
-<THUMBPRINT>` select differently. Every `keygen` command prints each
-generation's thumbprint to stderr, since that's the only identifier `prune
---thumbprint` takes.
+<THUMBPRINT>` select differently. To see each generation's thumbprint, the
+only identifier `--thumbprint` takes, along with its creation time and note:
+
+```sh
+cargo run --bin keygen -- list tang-keys.json
+```
 
 ### 4. Create the allowlist's KV namespace
 
