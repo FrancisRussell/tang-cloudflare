@@ -5,16 +5,23 @@ Worker.
 
 ## Background
 
-Encrypting a disk "at rest" only protects it if the key to unlock it isn't
-just sitting on the same machine. If the key does live there (so the
-machine can boot on its own, without someone typing a passphrase), that
-encryption doesn't protect against much: anyone who gets a copy of the disk
-gets the key too.
+Unlocking a disk at boot, without someone typing a passphrase, usually means
+keeping the real key off that disk and reachable from a remote server
+instead: stored there directly, or recoverable by sending the server
+something to decrypt. Either way, a single exchange with that server hands
+over something durable and reusable, the key itself or whatever unlocks it.
+Whoever ever sees that one exchange can decrypt that disk at any later
+point, with no further contact with the server at all.
 
-Network-Bound Disk Encryption (NBDE) is a way around that. The unlock key is
-stored on disk only in a wrapped, encrypted form. Unwrapping it requires
-talking to a separate server, over the network, at boot, and that server
-never learns the actual key either. So:
+Network-Bound Disk Encryption (NBDE) is built so that observing the
+exchange never gives you that. The unlock key is stored on disk only in a
+wrapped, encrypted form, and unwrapping it takes a live exchange with a
+separate server, over the network, at boot. Every unlock's server reply is
+useless without a one-time secret the client invents fresh each time and
+never sends anywhere, so recording any number of these exchanges, even for
+the same disk, hands over nothing durable. Defeating it takes something far
+more specific: extracting the server's actual private key, not just
+watching it answer requests. So:
 
 - A copy of the disk alone is useless: the wrapped key is worthless without
   the server's cooperation.
@@ -34,15 +41,20 @@ running yourself.
 ## How it works
 
 Tang answers two HTTP requests: one that advertises its public key, and one
-a client uses to complete the unlock exchange. Ordinarily it answers anyone
-who asks, since it's designed to serve any number of clients and holds
-nothing specific to any of them.
+a client uses to complete the unlock exchange. The protocol itself has no
+authentication; it relies entirely on network reachability, not
+credentials, to control who can ask. A Tang server normally gets that for
+free, running on a private network reachable only by the machines it's
+meant to unlock.
 
-This deployment is narrower: it's meant to serve exactly one machine (a
-VPS), so it only answers requests from that machine's IP address. There's no
-password or token check layered on top. The Linux tool that actually talks
-to Tang (`clevis`) has no way to send one, so the IP address is the only
-thing there is to check.
+A Cloudflare Worker doesn't: it's reachable from the whole internet by
+default. This deployment recreates the same restriction at the application
+layer instead, with an IP allowlist, so it only answers requests from the
+known, fixed set of machines it's meant to serve. That's access control,
+but not authentication: it's based on where a request comes from, not a
+credential proving who sent it. The Linux tool that actually talks to Tang
+(`clevis`) has no way to send a credential anyway, so network origin is
+the only thing there is to check.
 
 ## Setup
 
@@ -66,17 +78,19 @@ cargo run --bin keygen -- generate > tang-keys.json
 ```
 
 This generates the current generation's two keys and prints them as one JSON
-file. There's no way to recover them if they're lost, so before anything
-else:
+file. Both this and `rotate` (below) take an optional `--note <remark>`,
+recorded with the generation and shown later by `list`, e.g. `--note "annual
+rotation"`. There's no way to recover the keys if they're lost, so before
+anything else:
 
 1. Copy `tang-keys.json` into a password manager or other durable, offline
    backup.
 2. Upload it to Cloudflare: `npm run upload-key`. This first validates the
-   file with `check-key`, the same parsing and initialization the Worker
-   itself runs, catching a corrupt or malformed key before it ever reaches
-   Cloudflare. Takes a path other than `tang-keys.json`, e.g.
-   `npm run upload-key -- rotated-keys.json`, if the file isn't under that
-   name.
+   file with `check-key`, which checks each key's cryptographic validity
+   more thoroughly than the Worker ever does on a live request, catching a
+   corrupt or malformed key before it ever reaches Cloudflare. Takes a path
+   other than `tang-keys.json`, e.g. `npm run upload-key -- rotated-keys.json`,
+   if the file isn't under that name.
 3. Delete the local file.
 
 To rotate the keys later:
@@ -106,6 +120,11 @@ only identifier `--thumbprint` takes, along with its creation time and note:
 
 ```sh
 cargo run --bin keygen -- list tang-keys.json
+```
+
+```
+current: thumbprint E17UI1rXDxhAAZoWLo1d8_EZBy6-JUHvLvPeRV1EW9U, created 2026-10-09 15:29:07 UTC (annual rotation)
+retired: thumbprint Im_OiAfxu6vI9dOW7kM9d6YBPgag2VdLiYLDZlB5L64, created 2026-10-09 15:29:07 UTC (initial rollout)
 ```
 
 ### 4. Create the allowlist's KV namespace
