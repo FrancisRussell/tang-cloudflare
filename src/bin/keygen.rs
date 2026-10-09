@@ -88,17 +88,20 @@ fn read_tang_keys(path: &PathBuf) -> Result<TangKeys, String> {
     parse_tang_keys(&raw)
 }
 
-/// Prints each generation's exchange-key thumbprint to stderr: the only
-/// identifier `prune --thumbprint` takes, and otherwise only discoverable
-/// via a bound client's own pinned copy (e.g. `clevis luks list`'s `thp`).
+/// Prints one generation's identifying info to stderr: its exchange
+/// key's thumbprint (the only identifier `prune --thumbprint` takes, and
+/// otherwise only discoverable via a bound client's own pinned copy,
+/// e.g. `clevis luks list`'s `thp`), creation time, and note if any.
+fn describe_generation(label: &str, generation: &KeyGeneration) {
+    let note = generation.note.as_deref().map_or_else(String::new, |note| format!(" ({note})"));
+    eprintln!("{label}: thumbprint {}, created {}{note}", generation.exc.thumbprint(), generation.created_at);
+}
+
+/// Prints every generation's identifying info to stderr.
 fn print_thumbprints(keys: &TangKeys) {
-    let describe = |label: &str, generation: &KeyGeneration| {
-        let note = generation.note.as_deref().map_or_else(String::new, |note| format!(" ({note})"));
-        eprintln!("{label}: thumbprint {}, created {}{note}", generation.exc.thumbprint(), generation.created_at);
-    };
-    describe("current", &keys.current);
+    describe_generation("current", &keys.current);
     for generation in &keys.retired {
-        describe("retired", generation);
+        describe_generation("retired", generation);
     }
 }
 
@@ -169,45 +172,49 @@ fn prune_selector(
 }
 
 /// Pure core of `Command::Prune`: removes the retired generation(s)
-/// `selector` identifies, returning the result and how many were
+/// `selector` identifies, returning the result and the generations
 /// removed.
-fn prune_keys(mut keys: TangKeys, selector: PruneSelector) -> Result<(TangKeys, usize), String> {
-    let before = keys.retired.len();
-    match selector {
+fn prune_keys(mut keys: TangKeys, selector: PruneSelector) -> Result<(TangKeys, Vec<KeyGeneration>), String> {
+    let removed = match selector {
         PruneSelector::Thumbprint(thumbprint) => {
             let index = keys
                 .retired
                 .iter()
                 .position(|generation| generation.exc.thumbprint() == thumbprint)
                 .ok_or_else(|| format!("no retired generation found with thumbprint {thumbprint:?}"))?;
-            keys.retired.remove(index);
+            vec![keys.retired.remove(index)]
         }
         PruneSelector::OlderThan(max_age) => {
             let cutoff = chrono::Utc::now() - max_age;
-            keys.retired.retain(|generation| generation.created_at >= cutoff);
+            let (keep, removed) = keys.retired.into_iter().partition(|generation| generation.created_at >= cutoff);
+            keys.retired = keep;
+            removed
         }
-        // retired is newest-first (see TangKeys's doc comment), so
-        // truncating to `keep` elements keeps the newest and drops the
-        // oldest. `keep >= before` is a legitimate no-op, not an error:
-        // there's nothing wrong with asking to keep more than exists.
-        PruneSelector::Keep(keep) => keys.retired.truncate(keep.min(before)),
+        // retired is newest-first (see TangKeys's doc comment), so the
+        // first `keep` elements are the newest, and splitting there
+        // keeps them and returns the (older) rest as removed. `keep >=
+        // len` is a legitimate no-op, not an error: there's nothing
+        // wrong with asking to keep more than exists.
+        PruneSelector::Keep(keep) => keys.retired.split_off(keep.min(keys.retired.len())),
         PruneSelector::Oldest => {
             if keys.retired.is_empty() {
                 return Err("no retired generations to prune".to_string());
             }
-            keys.retired.truncate(before - 1);
+            vec![keys.retired.remove(keys.retired.len() - 1)]
         }
-    }
-    let pruned = before - keys.retired.len();
-    Ok((keys, pruned))
+    };
+    Ok((keys, removed))
 }
 
 /// Implements `Command::Prune`: reads `file`, prunes it, and prints the
 /// result.
 fn prune(file: &PathBuf, selector: PruneSelector) -> Result<(), String> {
     let keys = read_tang_keys(file)?;
-    let (keys, pruned) = prune_keys(keys, selector)?;
-    eprintln!("pruned {pruned} retired generation(s)");
+    let (keys, removed) = prune_keys(keys, selector)?;
+    eprintln!("pruned {} retired generation(s):", removed.len());
+    for generation in &removed {
+        describe_generation("pruned", generation);
+    }
     print_tang_keys(&keys)
 }
 
@@ -266,11 +273,13 @@ mod tests {
         let newest = test_generation(now - chrono::Duration::hours(1));
         let newest_thumbprint = newest.exc.thumbprint();
         let oldest = test_generation(now - chrono::Duration::hours(2));
+        let oldest_thumbprint = oldest.exc.thumbprint();
         let keys = TangKeys { current: test_generation(now), retired: vec![newest, oldest] };
 
-        let (pruned_keys, pruned) = prune_keys(keys, PruneSelector::Oldest).expect("prune must succeed");
+        let (pruned_keys, removed) = prune_keys(keys, PruneSelector::Oldest).expect("prune must succeed");
 
-        assert_eq!(pruned, 1);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].exc.thumbprint(), oldest_thumbprint, "the removed generation must be reported");
         assert_eq!(pruned_keys.retired.len(), 1);
         assert_eq!(pruned_keys.retired[0].exc.thumbprint(), newest_thumbprint);
     }
@@ -293,9 +302,9 @@ mod tests {
         ];
         let keys = TangKeys { current: test_generation(now), retired };
 
-        let (pruned_keys, pruned) = prune_keys(keys, PruneSelector::Keep(1)).expect("prune must succeed");
+        let (pruned_keys, removed) = prune_keys(keys, PruneSelector::Keep(1)).expect("prune must succeed");
 
-        assert_eq!(pruned, 2);
+        assert_eq!(removed.len(), 2);
         assert_eq!(pruned_keys.retired.len(), 1);
         assert_eq!(
             pruned_keys.retired[0].exc.thumbprint(),
@@ -312,9 +321,9 @@ mod tests {
             retired: vec![test_generation(now - chrono::Duration::hours(1))],
         };
 
-        let (pruned_keys, pruned) = prune_keys(keys, PruneSelector::Keep(10)).expect("prune must succeed");
+        let (pruned_keys, removed) = prune_keys(keys, PruneSelector::Keep(10)).expect("prune must succeed");
 
-        assert_eq!(pruned, 0);
+        assert_eq!(removed.len(), 0);
         assert_eq!(pruned_keys.retired.len(), 1);
     }
 
@@ -324,12 +333,14 @@ mod tests {
         let recent = test_generation(now - chrono::Duration::hours(1));
         let recent_thumbprint = recent.exc.thumbprint();
         let stale = test_generation(now - chrono::Duration::days(400));
+        let stale_thumbprint = stale.exc.thumbprint();
         let keys = TangKeys { current: test_generation(now), retired: vec![recent, stale] };
 
-        let (pruned_keys, pruned) =
+        let (pruned_keys, removed) =
             prune_keys(keys, PruneSelector::OlderThan(chrono::Duration::days(365))).expect("prune must succeed");
 
-        assert_eq!(pruned, 1);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].exc.thumbprint(), stale_thumbprint, "the removed generation must be reported");
         assert_eq!(pruned_keys.retired.len(), 1);
         assert_eq!(pruned_keys.retired[0].exc.thumbprint(), recent_thumbprint);
     }
@@ -343,10 +354,11 @@ mod tests {
         let drop_thumbprint = drop.exc.thumbprint();
         let keys = TangKeys { current: test_generation(now), retired: vec![keep, drop] };
 
-        let (pruned_keys, pruned) =
-            prune_keys(keys, PruneSelector::Thumbprint(drop_thumbprint)).expect("prune must succeed");
+        let (pruned_keys, removed) =
+            prune_keys(keys, PruneSelector::Thumbprint(drop_thumbprint.clone())).expect("prune must succeed");
 
-        assert_eq!(pruned, 1);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].exc.thumbprint(), drop_thumbprint, "the removed generation must be reported");
         assert_eq!(pruned_keys.retired.len(), 1);
         assert_eq!(pruned_keys.retired[0].exc.thumbprint(), keep_thumbprint);
     }
