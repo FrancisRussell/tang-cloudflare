@@ -88,36 +88,56 @@ fn read_tang_keys(path: &PathBuf) -> Result<TangKeys, String> {
     parse_tang_keys(&raw)
 }
 
+/// Formats `note` as " (note)" if present, or "" if not: the suffix
+/// every printed line below appends.
+fn note_suffix(note: Option<&str>) -> String {
+    note.map_or_else(String::new, |note| format!(" ({note})"))
+}
+
 /// Prints one generation's identifying info to stderr: its exchange
 /// key's thumbprint (the only identifier `prune --thumbprint` takes, and
 /// otherwise only discoverable via a bound client's own pinned copy,
 /// e.g. `clevis luks list`'s `thp`), creation time, and note if any.
 fn describe_generation(label: &str, generation: &KeyGeneration) {
-    let note = generation.note.as_deref().map_or_else(String::new, |note| format!(" ({note})"));
-    eprintln!("{label}: thumbprint {}, created {}{note}", generation.exc.thumbprint(), generation.created_at);
+    // created_at's Display impl includes however many subsecond digits
+    // the system clock reported, down to nanoseconds; seconds is all a
+    // human reading this needs.
+    let created_at = generation.created_at.format("%Y-%m-%d %H:%M:%S UTC");
+    eprintln!(
+        "{label}: thumbprint {}, created {created_at}{}",
+        generation.exc.thumbprint(),
+        note_suffix(generation.note.as_deref())
+    );
 }
 
-/// Prints every generation's identifying info to stderr.
+/// Prints every generation's identifying info to stderr, then a blank
+/// line, so the summary stays visually separate from the JSON that
+/// follows on stdout when both land on the same console.
 fn print_thumbprints(keys: &TangKeys) {
     describe_generation("current", &keys.current);
     for generation in &keys.retired {
         describe_generation("retired", generation);
     }
+    eprintln!();
 }
 
-/// Prints `keys`' thumbprint summary to stderr, then the full JSON to
-/// stdout, the common final step of every `keygen` command.
-fn print_tang_keys(keys: &TangKeys) -> Result<(), String> {
-    print_thumbprints(keys);
+/// Prints `keys` as pretty JSON to stdout, the common final step of
+/// every `keygen` command.
+fn print_json(keys: &TangKeys) -> Result<(), String> {
     let text = serde_json::to_string_pretty(keys).map_err(|e| format!("failed to serialize key set: {e}"))?;
     println!("{text}");
     Ok(())
 }
 
-/// Implements `Command::Generate`.
+/// Implements `Command::Generate`. Prints its own plain confirmation
+/// rather than `print_thumbprints`' current/retired dump: with no
+/// rotation history yet, there's nothing for "current" to contrast
+/// against.
 fn generate(note: Option<&str>) -> Result<(), String> {
     let current = generate_key_generation(note)?;
-    print_tang_keys(&TangKeys { current, retired: Vec::new() })
+    eprintln!("Generated key with thumbprint {}{}", current.exc.thumbprint(), note_suffix(current.note.as_deref()));
+    eprintln!();
+    print_json(&TangKeys { current, retired: Vec::new() })
 }
 
 /// Pure core of `Command::Rotate`: retires `keys.current` and mints a
@@ -133,7 +153,9 @@ fn rotate_keys(keys: TangKeys, note: Option<&str>) -> Result<TangKeys, String> {
 /// the result.
 fn rotate(file: &PathBuf, note: Option<&str>) -> Result<(), String> {
     let keys = read_tang_keys(file)?;
-    print_tang_keys(&rotate_keys(keys, note)?)
+    let keys = rotate_keys(keys, note)?;
+    print_thumbprints(&keys);
+    print_json(&keys)
 }
 
 /// Which retired generations `prune` should remove. Built from
@@ -215,7 +237,8 @@ fn prune(file: &PathBuf, selector: PruneSelector) -> Result<(), String> {
     for generation in &removed {
         describe_generation("pruned", generation);
     }
-    print_tang_keys(&keys)
+    print_thumbprints(&keys);
+    print_json(&keys)
 }
 
 fn main() -> ExitCode {
