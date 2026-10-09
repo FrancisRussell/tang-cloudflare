@@ -117,14 +117,20 @@ fn generate(note: Option<&str>) -> Result<(), String> {
     print_tang_keys(&TangKeys { current, retired: Vec::new() })
 }
 
-/// Implements `Command::Rotate`: retires the existing current generation
-/// and mints a new one.
-fn rotate(file: &PathBuf, note: Option<&str>) -> Result<(), String> {
-    let mut keys = read_tang_keys(file)?;
+/// Pure core of `Command::Rotate`: retires `keys.current` and mints a
+/// fresh one, leaving the rest of `retired` untouched and in order.
+fn rotate_keys(keys: TangKeys, note: Option<&str>) -> Result<TangKeys, String> {
     let new_current = generate_key_generation(note)?;
-    keys.retired.insert(0, keys.current);
-    keys.current = new_current;
-    print_tang_keys(&keys)
+    let mut retired = keys.retired;
+    retired.insert(0, keys.current);
+    Ok(TangKeys { current: new_current, retired })
+}
+
+/// Implements `Command::Rotate`: reads `file`, rotates it, and prints
+/// the result.
+fn rotate(file: &PathBuf, note: Option<&str>) -> Result<(), String> {
+    let keys = read_tang_keys(file)?;
+    print_tang_keys(&rotate_keys(keys, note)?)
 }
 
 /// Which retired generations `prune` should remove. Built from
@@ -162,12 +168,12 @@ fn prune_selector(
     }
 }
 
-/// Implements `Command::Prune`: removes the retired generation(s)
-/// `selector` identifies from `file`'s `TangKeys`.
-fn prune(file: &PathBuf, selector: PruneSelector) -> Result<(), String> {
-    let mut keys = read_tang_keys(file)?;
+/// Pure core of `Command::Prune`: removes the retired generation(s)
+/// `selector` identifies, returning the result and how many were
+/// removed.
+fn prune_keys(mut keys: TangKeys, selector: PruneSelector) -> Result<(TangKeys, usize), String> {
     let before = keys.retired.len();
-    let pruned = match selector {
+    match selector {
         PruneSelector::Thumbprint(thumbprint) => {
             let index = keys
                 .retired
@@ -175,29 +181,32 @@ fn prune(file: &PathBuf, selector: PruneSelector) -> Result<(), String> {
                 .position(|generation| generation.exc.thumbprint() == thumbprint)
                 .ok_or_else(|| format!("no retired generation found with thumbprint {thumbprint:?}"))?;
             keys.retired.remove(index);
-            1
         }
         PruneSelector::OlderThan(max_age) => {
             let cutoff = chrono::Utc::now() - max_age;
             keys.retired.retain(|generation| generation.created_at >= cutoff);
-            before - keys.retired.len()
         }
         // retired is newest-first (see TangKeys's doc comment), so
         // truncating to `keep` elements keeps the newest and drops the
         // oldest. `keep >= before` is a legitimate no-op, not an error:
         // there's nothing wrong with asking to keep more than exists.
-        PruneSelector::Keep(keep) => {
-            keys.retired.truncate(keep.min(before));
-            before - keys.retired.len()
-        }
+        PruneSelector::Keep(keep) => keys.retired.truncate(keep.min(before)),
         PruneSelector::Oldest => {
             if keys.retired.is_empty() {
                 return Err("no retired generations to prune".to_string());
             }
             keys.retired.truncate(before - 1);
-            1
         }
-    };
+    }
+    let pruned = before - keys.retired.len();
+    Ok((keys, pruned))
+}
+
+/// Implements `Command::Prune`: reads `file`, prunes it, and prints the
+/// result.
+fn prune(file: &PathBuf, selector: PruneSelector) -> Result<(), String> {
+    let keys = read_tang_keys(file)?;
+    let (keys, pruned) = prune_keys(keys, selector)?;
     eprintln!("pruned {pruned} retired generation(s)");
     print_tang_keys(&keys)
 }
@@ -216,5 +225,146 @@ fn main() -> ExitCode {
             eprintln!("{e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A genuinely valid, freshly generated `KeyGeneration` stamped with
+    /// an explicit `created_at`, so tests can control ordering.
+    fn test_generation(created_at: chrono::DateTime<chrono::Utc>) -> KeyGeneration {
+        let mut generation = generate_key_generation(None).expect("key generation must succeed");
+        generation.created_at = created_at;
+        generation
+    }
+
+    #[test]
+    fn test_rotate_keys_retires_the_old_current_unchanged_and_mints_a_new_one() {
+        let now = chrono::Utc::now();
+        let old_current = test_generation(now);
+        let old_current_thumbprint = old_current.exc.thumbprint();
+        let keys = TangKeys { current: old_current, retired: vec![test_generation(now - chrono::Duration::hours(1))] };
+
+        let rotated = rotate_keys(keys, Some("rotation note")).expect("rotate must succeed");
+
+        assert_ne!(rotated.current.exc.thumbprint(), old_current_thumbprint, "a fresh key must be generated");
+        assert_eq!(rotated.current.note.as_deref(), Some("rotation note"));
+        assert_eq!(rotated.retired.len(), 2, "the old current must join retired, not replace it");
+        assert_eq!(
+            rotated.retired[0].exc.thumbprint(),
+            old_current_thumbprint,
+            "the old current must be retired first"
+        );
+        assert_eq!(rotated.retired[0].created_at, now, "the retired copy must be unchanged");
+    }
+
+    #[test]
+    fn test_prune_keys_oldest_removes_only_the_single_oldest() {
+        let now = chrono::Utc::now();
+        let newest = test_generation(now - chrono::Duration::hours(1));
+        let newest_thumbprint = newest.exc.thumbprint();
+        let oldest = test_generation(now - chrono::Duration::hours(2));
+        let keys = TangKeys { current: test_generation(now), retired: vec![newest, oldest] };
+
+        let (pruned_keys, pruned) = prune_keys(keys, PruneSelector::Oldest).expect("prune must succeed");
+
+        assert_eq!(pruned, 1);
+        assert_eq!(pruned_keys.retired.len(), 1);
+        assert_eq!(pruned_keys.retired[0].exc.thumbprint(), newest_thumbprint);
+    }
+
+    #[test]
+    fn test_prune_keys_oldest_rejects_an_empty_retired_list() {
+        let keys = TangKeys { current: test_generation(chrono::Utc::now()), retired: Vec::new() };
+        assert!(prune_keys(keys, PruneSelector::Oldest).is_err());
+    }
+
+    #[test]
+    fn test_prune_keys_keep_keeps_only_the_n_newest() {
+        let now = chrono::Utc::now();
+        let newest = test_generation(now - chrono::Duration::hours(1));
+        let newest_thumbprint = newest.exc.thumbprint();
+        let retired = vec![
+            newest,
+            test_generation(now - chrono::Duration::hours(2)),
+            test_generation(now - chrono::Duration::hours(3)),
+        ];
+        let keys = TangKeys { current: test_generation(now), retired };
+
+        let (pruned_keys, pruned) = prune_keys(keys, PruneSelector::Keep(1)).expect("prune must succeed");
+
+        assert_eq!(pruned, 2);
+        assert_eq!(pruned_keys.retired.len(), 1);
+        assert_eq!(
+            pruned_keys.retired[0].exc.thumbprint(),
+            newest_thumbprint,
+            "keep must retain the newest, not the oldest"
+        );
+    }
+
+    #[test]
+    fn test_prune_keys_keep_more_than_present_is_a_no_op() {
+        let now = chrono::Utc::now();
+        let keys = TangKeys {
+            current: test_generation(now),
+            retired: vec![test_generation(now - chrono::Duration::hours(1))],
+        };
+
+        let (pruned_keys, pruned) = prune_keys(keys, PruneSelector::Keep(10)).expect("prune must succeed");
+
+        assert_eq!(pruned, 0);
+        assert_eq!(pruned_keys.retired.len(), 1);
+    }
+
+    #[test]
+    fn test_prune_keys_older_than_removes_only_generations_past_the_cutoff() {
+        let now = chrono::Utc::now();
+        let recent = test_generation(now - chrono::Duration::hours(1));
+        let recent_thumbprint = recent.exc.thumbprint();
+        let stale = test_generation(now - chrono::Duration::days(400));
+        let keys = TangKeys { current: test_generation(now), retired: vec![recent, stale] };
+
+        let (pruned_keys, pruned) =
+            prune_keys(keys, PruneSelector::OlderThan(chrono::Duration::days(365))).expect("prune must succeed");
+
+        assert_eq!(pruned, 1);
+        assert_eq!(pruned_keys.retired.len(), 1);
+        assert_eq!(pruned_keys.retired[0].exc.thumbprint(), recent_thumbprint);
+    }
+
+    #[test]
+    fn test_prune_keys_thumbprint_removes_only_the_matching_generation() {
+        let now = chrono::Utc::now();
+        let keep = test_generation(now - chrono::Duration::hours(1));
+        let keep_thumbprint = keep.exc.thumbprint();
+        let drop = test_generation(now - chrono::Duration::hours(2));
+        let drop_thumbprint = drop.exc.thumbprint();
+        let keys = TangKeys { current: test_generation(now), retired: vec![keep, drop] };
+
+        let (pruned_keys, pruned) =
+            prune_keys(keys, PruneSelector::Thumbprint(drop_thumbprint)).expect("prune must succeed");
+
+        assert_eq!(pruned, 1);
+        assert_eq!(pruned_keys.retired.len(), 1);
+        assert_eq!(pruned_keys.retired[0].exc.thumbprint(), keep_thumbprint);
+    }
+
+    #[test]
+    fn test_prune_keys_thumbprint_rejects_an_unknown_thumbprint() {
+        let keys = TangKeys { current: test_generation(chrono::Utc::now()), retired: Vec::new() };
+        assert!(prune_keys(keys, PruneSelector::Thumbprint("unknown".to_string())).is_err());
+    }
+
+    #[test]
+    fn test_prune_selector_parses_an_older_than_duration() {
+        let selector = prune_selector(None, Some("2days"), None).expect("a valid duration must parse");
+        assert!(matches!(selector, PruneSelector::OlderThan(d) if d == chrono::Duration::days(2)));
+    }
+
+    #[test]
+    fn test_prune_selector_rejects_an_invalid_duration() {
+        assert!(prune_selector(None, Some("not a duration"), None).is_err());
     }
 }
