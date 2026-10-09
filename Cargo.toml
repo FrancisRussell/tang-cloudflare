@@ -25,11 +25,11 @@ worker = { version = "0.8", default-features = false }
 [dev-dependencies]
 ctrlc = "3.5.2"
 elliptic-curve = { version = "0.13", default-features = false, features = ["arithmetic", "sec1"] }
-nix = { version = "0.31.3", features = ["signal"] }
+nix = { version = "0.31.3", default-features = false, features = ["signal"] }
 p521 = { version = "0.13", default-features = false, features = ["arithmetic", "getrandom"] }
 serde = { version = "1", default-features = false, features = ["derive"] }
 sha2 = { version = "0.10", default-features = false, features = ["std"] }
-ureq = "2"
+ureq = { version = "2", default-features = false }
 
 [features]
 # Gates tests/integration.rs; see that file's header comment.
