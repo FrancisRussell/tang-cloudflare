@@ -68,6 +68,9 @@ const DISALLOWED_IP: &str = "8.8.8.8";
 /// need to be on the curve, only the right length.
 const P521_COORDINATE_BYTE_LEN: usize = 66;
 
+/// A body size comfortably over the Worker's request body limit.
+const OVERSIZED_BODY_BYTES: usize = 64 * 1024;
+
 /// PGID of the currently-running `wrangler dev` process group, or 0 if none.
 /// Shared with the SIGINT handler installed in `integration_test`: a signal
 /// terminates the process without unwinding, so `Drop for WranglerDev` never
@@ -530,6 +533,17 @@ fn scenario_rec_malformed_body_is_rejected_without_crashing(dev: &WranglerDev, e
     assert_eq!(result.status, StatusCode::OK);
 }
 
+/// An oversized body must be rejected without ever being fully buffered,
+/// and without taking the server down.
+fn scenario_rec_oversized_body_is_rejected_without_crashing(dev: &WranglerDev, exc_kid: &str) {
+    let body = "x".repeat(OVERSIZED_BODY_BYTES);
+    let result = post_rec(dev, exc_kid, Some(ALLOWED_IP), &body);
+    assert_eq!(result.status, StatusCode::PAYLOAD_TOO_LARGE);
+
+    let result = get_adv(dev, Some(ALLOWED_IP));
+    assert_eq!(result.status, StatusCode::OK);
+}
+
 #[test]
 fn integration_test() {
     install_sigint_cleanup();
@@ -544,5 +558,6 @@ fn integration_test() {
     scenario_rec_disallowed_ip_is_forbidden(&dev, &exc_kid);
     scenario_rec_unknown_kid_is_not_found(&dev);
     scenario_rec_malformed_body_is_rejected_without_crashing(&dev, &exc_kid);
+    scenario_rec_oversized_body_is_rejected_without_crashing(&dev, &exc_kid);
     scenario_rec_matches_expected_ecdh_point(&dev, &exc_kid, &exc_key);
 }

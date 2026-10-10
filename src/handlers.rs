@@ -1,3 +1,4 @@
+use futures_util::StreamExt;
 use http::StatusCode;
 use tangy_lib::MyJwkEcKey;
 use worker::*;
@@ -18,6 +19,13 @@ mod content_types {
 /// `ctx.param` looks it up by, kept as one constant so the two can't drift
 /// apart silently.
 pub(crate) const KID_PARAM: &str = "kid";
+
+/// Real `/rec` bodies are JWK EC points a few hundred bytes long; anything
+/// past this is already implausible rather than a request this project
+/// needs to accept. Also closes a gap `looks_like_ec_point` alone doesn't:
+/// `MyJwkEcKey` has no `deny_unknown_fields`, so a body padded with a huge
+/// unrecognized field would otherwise still parse and pass it.
+const MAX_BODY_BYTES: usize = 4096;
 
 /// `Response::error` using `status`'s own canonical reason phrase (e.g.
 /// "Forbidden" for 403) as the message, for error paths that carry no extra
@@ -49,6 +57,29 @@ pub(crate) async fn handle_adv(req: Request, ctx: RouteContext<()>) -> Result<Re
     }
 }
 
+/// `req`'s body, or `None` if it exceeds `MAX_BODY_BYTES`. A declared
+/// `Content-Length` over the limit is refused without reading anything;
+/// the read itself is also capped, so a chunked or under-declared body
+/// can't be buffered past the limit either.
+async fn read_capped_body(req: &mut Request) -> Result<Option<Vec<u8>>> {
+    let declared_length =
+        req.headers().get(http::header::CONTENT_LENGTH.as_str())?.and_then(|v| v.parse::<usize>().ok());
+    if declared_length.is_some_and(|length| length > MAX_BODY_BYTES) {
+        return Ok(None);
+    }
+
+    let Ok(mut stream) = req.stream() else { return Ok(Some(Vec::new())) };
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if body.len() + chunk.len() > MAX_BODY_BYTES {
+            return Ok(None);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(Some(body))
+}
+
 /// True if `body` parses as the EC public JWK `tangy_lib::TangyLib::rec`
 /// expects. `tangy-lib` parses its input with bare `.unwrap()`s rather than
 /// returning an error, so anything malformed reaching it panics, and this
@@ -59,8 +90,8 @@ pub(crate) async fn handle_adv(req: Request, ctx: RouteContext<()>) -> Result<Re
 /// field present with the wrong JSON type; `decode_ec_point` catches a
 /// syntactically valid but off-curve point the same way, which otherwise
 /// needs the curve arithmetic `tangy-lib` itself does to detect.
-fn looks_like_ec_point(body: &str) -> bool {
-    let Ok(key) = serde_json::from_str::<MyJwkEcKey>(body) else { return false };
+fn looks_like_ec_point(body: &[u8]) -> bool {
+    let Ok(key) = serde_json::from_slice::<MyJwkEcKey>(body) else { return false };
     key.kty == "EC" && key.crv == "P-521" && decode_ec_point(&key.x, &key.y).is_some()
 }
 
@@ -72,10 +103,13 @@ pub(crate) async fn handle_rec(mut req: Request, ctx: RouteContext<()>) -> Resul
     let Some(kid) = ctx.param(KID_PARAM).cloned() else {
         return error_response(StatusCode::BAD_REQUEST);
     };
-    let body = req.text().await?;
+    let Some(body) = read_capped_body(&mut req).await? else {
+        return error_response(StatusCode::PAYLOAD_TOO_LARGE);
+    };
     if !looks_like_ec_point(&body) {
         return error_response(StatusCode::BAD_REQUEST);
     }
+    let body = String::from_utf8(body).expect("looks_like_ec_point already deserialized this as valid UTF-8 JSON");
     let keys = match TangKeys::load_from_env(&ctx.env) {
         Ok(k) => k,
         Err(status) => return error_response(status),
@@ -111,14 +145,14 @@ mod tests {
 
     #[test]
     fn test_looks_like_ec_point_accepts_a_well_formed_point() {
-        assert!(looks_like_ec_point(&valid_rec_body()));
+        assert!(looks_like_ec_point(valid_rec_body().as_bytes()));
     }
 
     #[test]
     fn test_looks_like_ec_point_rejects_an_off_curve_point() {
         let coord = b64_coordinate_of_len(P521_COORDINATE_BYTE_LEN);
         let body = format!(r#"{{"kty":"EC","crv":"P-521","x":"{coord}","y":"{coord}"}}"#);
-        assert!(!looks_like_ec_point(&body));
+        assert!(!looks_like_ec_point(body.as_bytes()));
     }
 
     /// A genuinely on-curve point's `x`/`y` bytes, re-split at a different
@@ -139,33 +173,33 @@ mod tests {
         let short_x = base64ct::Base64UrlUnpadded::encode_string(short_x);
         let long_y = base64ct::Base64UrlUnpadded::encode_string(long_y);
         let body = format!(r#"{{"kty":"EC","crv":"P-521","x":"{short_x}","y":"{long_y}"}}"#);
-        assert!(!looks_like_ec_point(&body));
+        assert!(!looks_like_ec_point(body.as_bytes()));
     }
 
     #[test]
     fn test_looks_like_ec_point_rejects_malformed_json() {
-        assert!(!looks_like_ec_point("not json"));
+        assert!(!looks_like_ec_point(b"not json"));
     }
 
     #[test]
     fn test_looks_like_ec_point_rejects_the_wrong_curve() {
         let coord = b64_coordinate_of_len(P521_COORDINATE_BYTE_LEN);
         let body = format!(r#"{{"kty":"EC","crv":"P-256","x":"{coord}","y":"{coord}"}}"#);
-        assert!(!looks_like_ec_point(&body));
+        assert!(!looks_like_ec_point(body.as_bytes()));
     }
 
     #[test]
     fn test_looks_like_ec_point_rejects_the_wrong_key_type() {
         let coord = b64_coordinate_of_len(P521_COORDINATE_BYTE_LEN);
         let body = format!(r#"{{"kty":"RSA","crv":"P-521","x":"{coord}","y":"{coord}"}}"#);
-        assert!(!looks_like_ec_point(&body));
+        assert!(!looks_like_ec_point(body.as_bytes()));
     }
 
     #[test]
     fn test_looks_like_ec_point_rejects_wrong_length_coordinates() {
         let short = b64_coordinate_of_len(P521_COORDINATE_BYTE_LEN - 1);
         let body = format!(r#"{{"kty":"EC","crv":"P-521","x":"{short}","y":"{short}"}}"#);
-        assert!(!looks_like_ec_point(&body));
+        assert!(!looks_like_ec_point(body.as_bytes()));
     }
 
     /// Guards against a recognized `tangy_lib::MyJwkEcKey` field (e.g.
@@ -175,6 +209,6 @@ mod tests {
     fn test_looks_like_ec_point_rejects_a_known_field_with_the_wrong_type() {
         let coord = b64_coordinate_of_len(P521_COORDINATE_BYTE_LEN);
         let body = format!(r#"{{"kty":"EC","crv":"P-521","x":"{coord}","y":"{coord}","alg":123}}"#);
-        assert!(!looks_like_ec_point(&body));
+        assert!(!looks_like_ec_point(body.as_bytes()));
     }
 }

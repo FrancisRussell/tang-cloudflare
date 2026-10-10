@@ -1088,6 +1088,7 @@ dependencies = [
  "console_error_panic_hook",
  "ctrlc",
  "elliptic-curve",
+ "futures-util",
  "getrandom",
  "http",
  "humantime",
