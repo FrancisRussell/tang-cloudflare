@@ -12,13 +12,15 @@
 use std::io::Read;
 use std::process::ExitCode;
 
+use tang_cloudflare::TangKeys;
+
 fn main() -> ExitCode {
     let mut raw = String::new();
     if let Err(e) = std::io::stdin().read_to_string(&mut raw) {
         eprintln!("failed to read key JSON from stdin: {e}");
         return ExitCode::FAILURE;
     }
-    match tang_cloudflare::check_tangy_keys(&raw) {
+    match raw.parse::<TangKeys>().and_then(|keys| keys.validate()) {
         Ok(()) => {
             println!("OK: key set parses and initializes correctly");
             ExitCode::SUCCESS

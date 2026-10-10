@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use tang_cloudflare::{parse_tang_keys, KeyGeneration, TangKeys, EXCHANGE_KEY_ALG, SIGNING_KEY_ALG};
+use tang_cloudflare::{KeyGeneration, TangKeys, EXCHANGE_KEY_ALG, SIGNING_KEY_ALG};
 use tangy_lib::MyJwkEcKey;
 
 #[derive(Debug, Clone, Parser)]
@@ -91,14 +91,12 @@ fn generate_key_generation(note: Option<&str>) -> Result<KeyGeneration, String> 
 /// command but `generate` starts from.
 fn read_tang_keys(path: &PathBuf) -> Result<TangKeys, String> {
     let raw = std::fs::read_to_string(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-    parse_tang_keys(&raw)
+    raw.parse()
 }
 
 /// Formats `note` as " (note)" if present, or "" if not: the suffix
 /// every printed line below appends.
-fn note_suffix(note: Option<&str>) -> String {
-    note.map_or_else(String::new, |note| format!(" ({note})"))
-}
+fn note_suffix(note: Option<&str>) -> String { note.map_or_else(String::new, |note| format!(" ({note})")) }
 
 /// Formats one generation's identifying info: its exchange key's
 /// thumbprint (the only identifier `prune --thumbprint` takes, and
