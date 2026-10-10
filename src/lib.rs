@@ -205,12 +205,27 @@ fn build_adv_tangy(keys: &TangKeys) -> std::result::Result<TangyLib, String> {
     TangyLib::init(KeySource::Vector(&adv_refs)).map_err(|e| e.to_string())
 }
 
-/// Builds the `TangyLib` that serves `/rec`: every generation, current
-/// and retired, so a disk still bound to a retired key keeps unlocking.
-fn build_rec_tangy(keys: &TangKeys) -> std::result::Result<TangyLib, String> {
-    let rec_keys = key_strings(keys.generations())?;
+/// Builds the `TangyLib` that serves `/rec` from `generations`. `init`
+/// signs a fresh advertisement per signing key given to it, so the live
+/// Worker only ever passes the single generation a request's `kid`
+/// actually matched (see `find_generation`), keeping that cost constant
+/// regardless of how many retired generations exist; `check_tangy_keys`
+/// passes every generation at once, to validate them all against one
+/// shared instance.
+fn build_rec_tangy<'a>(generations: impl Iterator<Item = &'a KeyGeneration>) -> std::result::Result<TangyLib, String> {
+    let rec_keys = key_strings(generations)?;
     let rec_refs: Vec<&str> = rec_keys.iter().map(String::as_str).collect();
     TangyLib::init(KeySource::Vector(&rec_refs)).map_err(|e| e.to_string())
+}
+
+/// Finds the generation whose exchange key's thumbprint is `kid`, the
+/// only identifier `/rec` is ever asked for. A thumbprint is just a
+/// SHA-256 hash (see `tangy_lib`'s `MyJwkEcKey::thumbprint`), far cheaper
+/// than the real ECDSA signature `TangyLib::init` performs per signing
+/// key, so the live Worker checks this first and rejects an unknown `kid`
+/// without ever building a `TangyLib` for it.
+fn find_generation<'a>(keys: &'a TangKeys, kid: &str) -> Option<&'a KeyGeneration> {
+    keys.generations().find(|generation| generation.exc.thumbprint() == kid)
 }
 
 /// The P-521 curve's generator point, in the same JWK coordinate encoding
@@ -290,7 +305,7 @@ pub fn check_tangy_keys(raw: &str) -> std::result::Result<(), String> {
         check_key_point_matches_scalar(&generation.exc)
             .map_err(|e| format!("exchange key rejected (created {}): {e}", generation.created_at))?;
     }
-    let rec = build_rec_tangy(&keys)?;
+    let rec = build_rec_tangy(keys.generations())?;
     let dummy_request = format!(r#"{{"kty":"EC","crv":"P-521","x":"{GENERATOR_X}","y":"{GENERATOR_Y}"}}"#);
     for generation in keys.generations() {
         rec.rec(&generation.exc.thumbprint(), &dummy_request)
@@ -370,7 +385,10 @@ async fn handle_rec(mut req: Request, ctx: RouteContext<()>) -> Result<Response>
         Ok(k) => k,
         Err(status) => return error_response(status),
     };
-    let Ok(rec) = build_rec_tangy(&keys) else { return error_response(StatusCode::INTERNAL_SERVER_ERROR) };
+    let Some(generation) = find_generation(&keys, &kid) else { return error_response(StatusCode::NOT_FOUND) };
+    let Ok(rec) = build_rec_tangy(std::iter::once(generation)) else {
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR);
+    };
     match rec.rec(&kid, &body) {
         Ok(body) => Ok(Response::ok(body)?.with_headers(content_type_headers(JWK_JSON))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => error_response(StatusCode::NOT_FOUND),
@@ -604,6 +622,20 @@ mod tests {
     }
 
     #[test]
+    fn test_find_generation_locates_current_and_retired_by_thumbprint_but_not_an_unknown_one() {
+        let mut keys_json = valid_tang_keys_json();
+        keys_json["retired"] = serde_json::json!([valid_key_generation_json()]);
+        let keys = parse_tang_keys(&keys_json.to_string()).expect("a valid TangKeys");
+
+        let current_kid = keys.current.exc.thumbprint();
+        let retired_kid = keys.retired[0].exc.thumbprint();
+
+        assert!(find_generation(&keys, &current_kid).is_some());
+        assert!(find_generation(&keys, &retired_kid).is_some());
+        assert!(find_generation(&keys, "unknown-kid").is_none());
+    }
+
+    #[test]
     fn test_build_tangy_rec_can_still_resolve_a_retired_generation() {
         let mut keys_json = valid_tang_keys_json();
         let retired = valid_key_generation_json();
@@ -613,7 +645,7 @@ mod tests {
         };
         keys_json["retired"] = serde_json::json!([retired]);
         let keys = parse_tang_keys(&keys_json.to_string()).expect("a valid TangKeys");
-        let rec = build_rec_tangy(&keys).expect("a valid key set must build");
+        let rec = build_rec_tangy(keys.generations()).expect("a valid key set must build");
         let dummy_request = format!(r#"{{"kty":"EC","crv":"P-521","x":"{GENERATOR_X}","y":"{GENERATOR_Y}"}}"#);
         assert!(rec.rec(&retired_thumbprint, &dummy_request).is_ok());
     }
