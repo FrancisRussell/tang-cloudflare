@@ -137,6 +137,12 @@ Paste the printed `id` into `wrangler.toml`'s `[[kv_namespaces]]` block, in
 place of `REPLACE_WITH_NAMESPACE_ID`. A one-time step: every future deploy
 reuses the same namespace once its `id` is there.
 
+`wrangler.toml` also declares a per-IP rate limit (60 requests/minute), a
+backstop against one source — an allowed IP with a retry-loop bug, or a
+disallowed one probing — repeatedly paying for the KV read and whatever
+follows it. Nothing to set up here: it takes effect straight from this
+file once deployed.
+
 ### 5. Set the allowed IP address
 
 ```sh

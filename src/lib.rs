@@ -46,6 +46,10 @@ const ALLOWED_CIDRS_KV_KEY: &str = "cidrs";
 /// assembled by hand from separate values.
 const TANG_KEYS_SECRET: &str = "TANG_KEYS";
 
+/// Per-IP request cap (see wrangler.toml), a backstop against one source
+/// repeatedly paying for a KV read and whatever follows it.
+const RATE_LIMIT_BINDING: &str = "RATE_LIMITER";
+
 /// The request's `CF-Connecting-IP` header, if present.
 fn get_client_ip(req: &Request) -> Option<String> {
     req.headers().get(header_names::CF_CONNECTING_IP.as_str()).ok().flatten()
@@ -89,9 +93,24 @@ fn ip_allowed(req: &Request, allowed: &[IpNetwork]) -> bool {
     allowed.iter().any(|net| net.contains(ip))
 }
 
-/// True if `req` is allowed to reach `/adv` or `/rec`, per the CIDR list in
-/// `ALLOWED_CIDRS_KV`.
+/// True if `req`'s source IP is still within `RATE_LIMIT_BINDING`'s
+/// per-IP cap. Checked before the KV read in `authorized`, so a source
+/// hammering the Worker doesn't keep paying for it. Fails closed on a
+/// missing IP, same as `ip_allowed`; fails open on the binding itself
+/// being unreachable, since a rate-limiter hiccup shouldn't take down
+/// the real access check that follows it.
+async fn rate_limit_ok(req: &Request, env: &Env) -> bool {
+    let Some(ip) = get_client_ip(req) else { return false };
+    let Ok(limiter) = env.rate_limiter(RATE_LIMIT_BINDING) else { return true };
+    limiter.limit(ip).await.map_or(true, |outcome| outcome.success)
+}
+
+/// True if `req` is allowed to reach `/adv` or `/rec`: within the per-IP
+/// rate limit, and in the CIDR list in `ALLOWED_CIDRS_KV`.
 async fn authorized(req: &Request, env: &Env) -> bool {
+    if !rate_limit_ok(req, env).await {
+        return false;
+    }
     let Ok(kv) = env.kv(ALLOWED_CIDRS_KV_BINDING) else { return false };
     let Ok(Some(allowed_cidrs)) = kv.get(ALLOWED_CIDRS_KV_KEY).text().await else { return false };
     let allowed = parse_cidr_list(&allowed_cidrs);

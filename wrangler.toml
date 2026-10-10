@@ -32,3 +32,16 @@ id = "REPLACE_WITH_NAMESPACE_ID"
 # TANG_KEYS is a secret, set with `npm run upload-key`, in the same JSON
 # shape `keygen` prints and the password-manager backup holds, so this is
 # a direct paste with nothing to assemble by hand
+
+# Backstop against one source (an allowed IP with a retry-loop bug, or a
+# disallowed one probing) repeatedly paying for a KV read and whatever
+# follows it: a per-IP cap, checked in the Worker itself, needing no
+# custom domain. 60/minute is far above any plausible legitimate burst
+# (even several machines sharing a NAT gateway rebooting together, or a
+# dev session hammering the endpoint), while still cutting off anything
+# actually pathological. namespace_id is just a locally-chosen tag, not a
+# provisioned resource.
+[[ratelimits]]
+name = "RATE_LIMITER"
+namespace_id = "1001"
+simple = { limit = 60, period = 60 }
