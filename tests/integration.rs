@@ -485,10 +485,15 @@ fn scenario_rec_disallowed_ip_is_forbidden(dev: &WranglerDev, exc_kid: &str) {
     assert_eq!(result.status, StatusCode::FORBIDDEN);
 }
 
-/// Asserts `/rec` returns 404 for a `kid` that matches no stored key.
+/// Asserts `/rec` returns 404 for a `kid` that matches no stored key. Uses a
+/// genuinely valid, on-curve point so this exercises kid lookup specifically,
+/// not body validation.
 fn scenario_rec_unknown_kid_is_not_found(dev: &WranglerDev) {
-    let coord = base64ct::Base64UrlUnpadded::encode_string(&[0u8; P521_COORDINATE_BYTE_LEN]);
-    let body = format!(r#"{{"kty":"EC","crv":"P-521","x":"{coord}","y":"{coord}"}}"#);
+    let client_pub =
+        p521::SecretKey::random(&mut elliptic_curve::rand_core::OsRng).public_key().to_encoded_point(false);
+    let x = base64ct::Base64UrlUnpadded::encode_string(client_pub.x().expect("uncompressed point has x"));
+    let y = base64ct::Base64UrlUnpadded::encode_string(client_pub.y().expect("uncompressed point has y"));
+    let body = format!(r#"{{"kty":"EC","crv":"P-521","x":"{x}","y":"{y}"}}"#);
     let result = post_rec(dev, "not-a-real-kid", Some(ALLOWED_IP), &body);
     assert_eq!(result.status, StatusCode::NOT_FOUND);
 }
@@ -508,6 +513,15 @@ fn scenario_rec_malformed_body_is_rejected_without_crashing(dev: &WranglerDev, e
     // must also be rejected cleanly, not just an unrecognized shape.
     let coord = base64ct::Base64UrlUnpadded::encode_string(&[0u8; P521_COORDINATE_BYTE_LEN]);
     let body = format!(r#"{{"kty":"EC","crv":"P-521","x":"{coord}","y":"{coord}","alg":123}}"#);
+    let result = post_rec(dev, exc_kid, Some(ALLOWED_IP), &body);
+    assert_eq!(result.status, StatusCode::BAD_REQUEST);
+
+    // A point that's the right shape (kty, crv, coordinate lengths) but
+    // off-curve, (0, 0), must also be rejected cleanly: this is the one
+    // tangy-lib itself can't catch without the curve arithmetic `rec`
+    // does internally, so it's the case that used to reach tangy-lib's
+    // own unwrap and crash the request instead of failing it.
+    let body = format!(r#"{{"kty":"EC","crv":"P-521","x":"{coord}","y":"{coord}"}}"#);
     let result = post_rec(dev, exc_kid, Some(ALLOWED_IP), &body);
     assert_eq!(result.status, StatusCode::BAD_REQUEST);
 

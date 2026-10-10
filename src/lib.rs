@@ -276,25 +276,62 @@ fn check_retired_order(keys: &TangKeys) -> std::result::Result<(), String> {
     Ok(())
 }
 
-/// Checks that `key`'s public point (`x`, `y`) is actually on the P-521
-/// curve and is the point its own private scalar `d` derives (i.e.
-/// `(x, y) == d * G`). Neither `TangyLib::init` nor `rec` ever read a
-/// key's public point at all (only `d` is used, to sign or to perform
-/// the exchange), so a wrong or off-curve `(x, y)` would otherwise pass
-/// every other check in this file and still be echoed verbatim into
-/// `/adv`'s payload.
-fn check_key_point_matches_scalar(key: &MyJwkEcKey) -> std::result::Result<(), String> {
-    let x = base64ct::Base64UrlUnpadded::decode_vec(&key.x).map_err(|e| format!("x coordinate: {e}"))?;
-    let y = base64ct::Base64UrlUnpadded::decode_vec(&key.y).map_err(|e| format!("y coordinate: {e}"))?;
+/// A P-521 field element's encoded length: 521 bits, rounded up to whole
+/// bytes.
+const P521_COORDINATE_BYTE_LEN: usize = 66;
+
+/// Decodes `x`/`y` as base64url and checks the resulting point is
+/// actually on the P-521 curve, returning it if so. Shared by
+/// `check_key_point_matches_scalar` (checking a stored key's own point)
+/// and `looks_like_ec_point` (checking a client's submitted point, where
+/// a wrong-but-right-shaped curve point would otherwise reach tangy-lib's
+/// own unwrap rather than fail cleanly).
+///
+/// Checks `x` and `y` each decode to exactly `P521_COORDINATE_BYTE_LEN`
+/// bytes, not just that the concatenated total is right: tangy-lib decodes
+/// `x` and `y` independently into fixed-size buffers, so two coordinates
+/// of the wrong individual lengths that happen to sum to a valid total
+/// (e.g. a correctly-split point's bytes re-split at a different offset)
+/// would pass an on-curve check done on the concatenation alone, yet still
+/// reach tangy-lib's own unwrap and panic.
+fn decode_ec_point(x: &str, y: &str) -> Option<p521::PublicKey> {
+    let x = base64ct::Base64UrlUnpadded::decode_vec(x).ok()?;
+    let y = base64ct::Base64UrlUnpadded::decode_vec(y).ok()?;
+    if x.len() != P521_COORDINATE_BYTE_LEN || y.len() != P521_COORDINATE_BYTE_LEN {
+        return None;
+    }
     let mut sec1 = Vec::with_capacity(1 + x.len() + y.len());
     sec1.push(0x04);
     sec1.extend_from_slice(&x);
     sec1.extend_from_slice(&y);
-    let claimed = p521::PublicKey::from_sec1_bytes(&sec1)
-        .map_err(|_| "public point is not a valid, on-curve P-521 point".to_string())?;
+    p521::PublicKey::from_sec1_bytes(&sec1).ok()
+}
+
+/// Checks that `key`'s public point (`x`, `y`) is actually on the P-521
+/// curve and is the point its own private scalar `d` derives (i.e.
+/// `(x, y) == d * G`). A wrong or off-curve `(x, y)` would otherwise pass
+/// every other check in this file: it would be echoed verbatim into
+/// `/adv`'s payload, and, more seriously, `TangyLib::init` and `rec` both
+/// decode a stored key via `to_secret_key()`, which cross-checks the
+/// derived public key against the JWK's own `(x, y)` and panics via
+/// `.unwrap()` on a mismatch. Catching that here, with an exact-length
+/// decode of `d` free of the padding ambiguity `tangy-lib`'s own decode
+/// has, is what lets `check_tangy_keys` run without `catch_unwind`.
+fn check_key_point_matches_scalar(key: &MyJwkEcKey) -> std::result::Result<(), String> {
+    let claimed = decode_ec_point(&key.x, &key.y)
+        .ok_or_else(|| "public point is not a valid, on-curve P-521 point".to_string())?;
 
     let d = key.d.as_deref().ok_or("missing private scalar \"d\"")?;
     let d = base64ct::Base64UrlUnpadded::decode_vec(d).map_err(|e| format!("d: {e}"))?;
+    // p521::SecretKey::from_slice accepts a shorter-than-field-size slice by
+    // left-zero-padding it, but tangy-lib's own decode of the same JWK field
+    // (elliptic_curve::jwk's fixed-size, right-zero-padding decode) would
+    // derive a different scalar from the same short bytes. Requiring the
+    // exact field length up front avoids that divergence rather than
+    // validating a scalar tangy-lib would actually interpret differently.
+    if d.len() != P521_COORDINATE_BYTE_LEN {
+        return Err("private scalar \"d\" is not a valid P-521 scalar's exact encoded length".to_string());
+    }
     let secret = p521::SecretKey::from_slice(&d).map_err(|_| "private scalar \"d\" is invalid".to_string())?;
 
     if secret.public_key() != claimed {
@@ -363,16 +400,6 @@ async fn handle_adv(req: Request, ctx: RouteContext<()>) -> Result<Response> {
     }
 }
 
-/// A P-521 field element's encoded length: 521 bits, rounded up to whole
-/// bytes.
-const P521_COORDINATE_BYTE_LEN: usize = 66;
-
-/// True if `field` is valid unpadded base64url that decodes to exactly a
-/// P-521 coordinate's length.
-fn is_p521_coordinate(field: &str) -> bool {
-    base64ct::Base64UrlUnpadded::decode_vec(field).is_ok_and(|bytes| bytes.len() == P521_COORDINATE_BYTE_LEN)
-}
-
 /// True if `body` parses as the EC public JWK `tangy_lib::TangyLib::rec`
 /// expects. `tangy-lib` parses its input with bare `.unwrap()`s rather than
 /// returning an error, so anything malformed reaching it panics, and this
@@ -380,12 +407,12 @@ fn is_p521_coordinate(field: &str) -> bool {
 /// reinit rather than just a failed request. Deserializing into tangy-lib's
 /// own `MyJwkEcKey`, instead of a hand-rolled subset of its fields, catches
 /// every shape mismatch it would itself reject, including an unrelated
-/// field present with the wrong JSON type. A syntactically valid but
-/// off-curve point still reaches the unwrap, since detecting that needs the
-/// curve arithmetic `tangy-lib` itself does.
+/// field present with the wrong JSON type; `decode_ec_point` catches a
+/// syntactically valid but off-curve point the same way, which otherwise
+/// needs the curve arithmetic `tangy-lib` itself does to detect.
 fn looks_like_ec_point(body: &str) -> bool {
     let Ok(key) = serde_json::from_str::<MyJwkEcKey>(body) else { return false };
-    key.kty == "EC" && key.crv == "P-521" && is_p521_coordinate(&key.x) && is_p521_coordinate(&key.y)
+    key.kty == "EC" && key.crv == "P-521" && decode_ec_point(&key.x, &key.y).is_some()
 }
 
 /// Handles `POST /rec/:kid`.
@@ -428,15 +455,16 @@ mod tests {
     use super::*;
 
     /// A valid base64url-encoded coordinate of exactly `byte_len` bytes, for
-    /// exercising `is_p521_coordinate`'s length check without a hardcoded
-    /// magic string.
+    /// exercising coordinate-length rejection without a hardcoded magic
+    /// string. All-zero, so also off-curve: not a stand-in for a genuinely
+    /// valid point (see `valid_rec_body`, which uses the real generator
+    /// point for that).
     fn b64_coordinate_of_len(byte_len: usize) -> String {
         base64ct::Base64UrlUnpadded::encode_string(&vec![0u8; byte_len])
     }
 
     fn valid_rec_body() -> String {
-        let coord = b64_coordinate_of_len(P521_COORDINATE_BYTE_LEN);
-        format!(r#"{{"kty":"EC","crv":"P-521","x":"{coord}","y":"{coord}"}}"#)
+        format!(r#"{{"kty":"EC","crv":"P-521","x":"{GENERATOR_X}","y":"{GENERATOR_Y}"}}"#)
     }
 
     #[test]
@@ -568,13 +596,12 @@ mod tests {
         let mut keys = valid_tang_keys_json();
         // A zero scalar: the right length, but out of a private key's
         // valid range, so parse_tang_keys alone (which never exercises
-        // the exchange key) would accept this.
+        // the exchange key) would accept this. check_key_point_matches_scalar
+        // rejects it cleanly, via p521::SecretKey::from_slice's own
+        // validation, well before tangy-lib ever sees it.
         keys["current"]["exc"]["d"] = serde_json::Value::String(base64ct::Base64UrlUnpadded::encode_string(&[0u8; 66]));
         assert!(parse_tang_keys(&keys.to_string()).is_ok());
-        // tangy-lib reaches a bare .unwrap() on this, same as check-key's
-        // own binary sees, so this runs under catch_unwind too.
-        let result = std::panic::catch_unwind(|| check_tangy_keys(&keys.to_string()));
-        assert!(matches!(result, Ok(Err(_)) | Err(_)));
+        assert!(check_tangy_keys(&keys.to_string()).is_err());
     }
 
     #[test]
@@ -583,8 +610,24 @@ mod tests {
         let mut retired = valid_key_generation_json();
         retired["exc"]["d"] = serde_json::Value::String(base64ct::Base64UrlUnpadded::encode_string(&[0u8; 66]));
         keys["retired"] = serde_json::json!([retired]);
-        let result = std::panic::catch_unwind(|| check_tangy_keys(&keys.to_string()));
-        assert!(matches!(result, Ok(Err(_)) | Err(_)));
+        assert!(check_tangy_keys(&keys.to_string()).is_err());
+    }
+
+    #[test]
+    fn test_check_tangy_keys_rejects_a_short_exchange_key_scalar() {
+        let mut keys = valid_tang_keys_json();
+        // Shorter than P521_COORDINATE_BYTE_LEN: p521::SecretKey::from_slice
+        // would silently left-zero-pad this back to some value, but
+        // tangy-lib's own decode of the same field would derive a
+        // different scalar from it, so this must be rejected outright
+        // rather than validated against the wrong interpretation. The
+        // dropped byte's value doesn't matter, only that the result is the
+        // wrong length.
+        let d =
+            base64ct::Base64UrlUnpadded::decode_vec(keys["current"]["exc"]["d"].as_str().expect("d must be a string"))
+                .expect("d must be valid base64url");
+        keys["current"]["exc"]["d"] = serde_json::Value::String(base64ct::Base64UrlUnpadded::encode_string(&d[1..]));
+        assert!(check_tangy_keys(&keys.to_string()).is_err());
     }
 
     #[test]
@@ -670,24 +713,36 @@ mod tests {
     }
 
     #[test]
-    fn test_is_p521_coordinate_accepts_exact_length() {
-        assert!(is_p521_coordinate(&b64_coordinate_of_len(P521_COORDINATE_BYTE_LEN)));
-    }
-
-    #[test]
-    fn test_is_p521_coordinate_rejects_short_and_long_values() {
-        assert!(!is_p521_coordinate(&b64_coordinate_of_len(P521_COORDINATE_BYTE_LEN - 1)));
-        assert!(!is_p521_coordinate(&b64_coordinate_of_len(P521_COORDINATE_BYTE_LEN + 1)));
-    }
-
-    #[test]
-    fn test_is_p521_coordinate_rejects_non_base64() {
-        assert!(!is_p521_coordinate("not valid base64url!"));
-    }
-
-    #[test]
     fn test_looks_like_ec_point_accepts_a_well_formed_point() {
         assert!(looks_like_ec_point(&valid_rec_body()));
+    }
+
+    #[test]
+    fn test_looks_like_ec_point_rejects_an_off_curve_point() {
+        let coord = b64_coordinate_of_len(P521_COORDINATE_BYTE_LEN);
+        let body = format!(r#"{{"kty":"EC","crv":"P-521","x":"{coord}","y":"{coord}"}}"#);
+        assert!(!looks_like_ec_point(&body));
+    }
+
+    /// A genuinely on-curve point's `x`/`y` bytes, re-split at a different
+    /// offset than the real 66/66 boundary, must still be rejected: the
+    /// concatenated total is the same valid, on-curve 132 bytes, so a check
+    /// done only on the concatenation (rather than on `x` and `y`
+    /// individually) would wrongly accept this, and tangy-lib's own,
+    /// independent per-field decode would then panic on it instead.
+    #[test]
+    fn test_looks_like_ec_point_rejects_coordinates_resplit_at_the_wrong_offset() {
+        let x = base64ct::Base64UrlUnpadded::decode_vec(GENERATOR_X).expect("GENERATOR_X must be valid base64url");
+        let y = base64ct::Base64UrlUnpadded::decode_vec(GENERATOR_Y).expect("GENERATOR_Y must be valid base64url");
+        let mut combined = x;
+        combined.extend_from_slice(&y);
+        assert_eq!(combined.len(), 2 * P521_COORDINATE_BYTE_LEN);
+
+        let (short_x, long_y) = combined.split_at(P521_COORDINATE_BYTE_LEN - 1);
+        let short_x = base64ct::Base64UrlUnpadded::encode_string(short_x);
+        let long_y = base64ct::Base64UrlUnpadded::encode_string(long_y);
+        let body = format!(r#"{{"kty":"EC","crv":"P-521","x":"{short_x}","y":"{long_y}"}}"#);
+        assert!(!looks_like_ec_point(&body));
     }
 
     #[test]

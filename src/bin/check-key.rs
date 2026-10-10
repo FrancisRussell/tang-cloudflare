@@ -4,11 +4,7 @@
 // `TANG_KEYS` expects) by running it through the exact parsing and
 // initialization the Worker itself uses, for both the signing and the
 // exchange key, catching a corrupt or malformed key before it's ever
-// uploaded. A syntactically valid but off-curve point reaches tangy-lib's
-// own unguarded `.unwrap()`s rather than a clean error, so this runs that
-// call under `catch_unwind` to still report that case as an ordinary
-// failure. Run without --release: catch_unwind needs unwinding, which
-// this project's own [profile.release] disables for the deployed Worker.
+// uploaded.
 //
 // Usage:
 //   cargo run --bin check-key < tang-keys.json
@@ -22,17 +18,13 @@ fn main() -> ExitCode {
         eprintln!("failed to read key JSON from stdin: {e}");
         return ExitCode::FAILURE;
     }
-    match std::panic::catch_unwind(|| tang_cloudflare::check_tangy_keys(&raw)) {
-        Ok(Ok(())) => {
+    match tang_cloudflare::check_tangy_keys(&raw) {
+        Ok(()) => {
             println!("OK: key set parses and initializes correctly");
             ExitCode::SUCCESS
         }
-        Ok(Err(e)) => {
+        Err(e) => {
             eprintln!("invalid key set: {e}");
-            ExitCode::FAILURE
-        }
-        Err(_) => {
-            eprintln!("invalid key set: tangy-lib panicked initializing it (see the panic message above)");
             ExitCode::FAILURE
         }
     }
