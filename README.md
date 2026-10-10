@@ -1,60 +1,78 @@
 # tang-cloudflare
 
-A [Tang](https://github.com/latchset/tang) server, deployed as a Cloudflare
+A [Tang](https://github.com/latchset/tang) server, deployable as a Cloudflare
 Worker.
 
 ## Background
 
-Unlocking a disk at boot, without someone typing a passphrase, usually means
-keeping the real key off that disk and reachable from a remote server
-instead: stored there directly, or recoverable by sending the server
-something to decrypt. Either way, a single exchange with that server hands
-over something durable and reusable, the key itself or whatever unlocks it.
-Whoever ever sees that one exchange can decrypt that disk at any later
-point, with no further contact with the server at all.
+There are many situations where it is desirable for a machine to have its
+storage encrypted. For servers and other machines that should remain online
+continuously, needing to manually unlock the machine is unacceptable, but for
+encryption to provide any sort of benefit, encryption keys must be kept
+off-machine.
 
-Network-Bound Disk Encryption (NBDE) is built so that observing the
-exchange never gives you that. The unlock key is stored on disk only in a
-wrapped, encrypted form, and unwrapping it takes a live exchange with a
-separate server, over the network, at boot. Every unlock's server reply is
-useless without a one-time secret the client invents fresh each time and
-never sends anywhere, so recording any number of these exchanges, even for
-the same disk, hands over nothing durable. Defeating it takes something far
-more specific: extracting the server's actual private key, not just
-watching it answer requests. So:
+Network-Bound Disk Encryption (NBDE) is a technology that allows the
+unlocking of a machine to be tied to its local network by using a client
+(Clevis) to communicate with a network-local server (Tang) to derive an
+encryption key on the client. A defining feature of NBDE is the usage of
+asymmetric cryptography, which makes this possible without secret key
+material leaving either the server or the client, while remaining secure in
+the presence of eavesdropping.
 
-- A copy of the disk alone is useless: the wrapped key is worthless without
-  the server's cooperation.
-- The server alone is also useless: it holds nothing specific to any one
-  machine, and can't decrypt anything by itself.
+The unlock key is stored on the client's disk only in a wrapped, encrypted
+form, and unwrapping it takes a live exchange with the Tang server, over the
+network, at boot. Every unlock's server reply is useless without a one-time
+secret the client invents fresh each time and never sends anywhere.
+Consequently:
 
-Only the combination of the disk and a live connection to that specific
-server can unlock anything.
+- A copy of the disk alone is useless since the wrapped key is worthless
+  without the server's cooperation.
+- Network access to the server alone is also useless since it holds nothing
+  specific to any one machine, and can't decrypt anything by itself.
 
-Tang is the open-source protocol and software that plays the server's part
-in this (paired with Clevis, the Linux tooling that does the wrapping and
-unwrapping). It's normally run on a machine you control, reachable only from
-the systems it's meant to unlock. This project is that server, running as a
-Cloudflare Worker instead of a machine you have to patch, back up, and keep
-running yourself.
+Only the combination of the disk and either a live connection to the Tang
+server, or a copy of the keys stored on the Tang server can be used to
+decrypt the client disk.
 
-## How it works
+Tang is the open-source protocol and software that plays the server's part in
+this (paired with Clevis, the Linux tooling that does the wrapping and
+unwrapping). This project is an implementation of Tang as a Cloudflare worker.
 
-Tang answers two HTTP requests: one that advertises its public key, and one
-a client uses to complete the unlock exchange. The protocol itself has no
-authentication; it relies entirely on network reachability, not
-credentials, to control who can ask. A Tang server normally gets that for
-free, running on a private network reachable only by the machines it's
-meant to unlock.
+## Security model
 
-A Cloudflare Worker doesn't: it's reachable from the whole internet by
-default. This deployment recreates the same restriction at the application
-layer instead, with an IP allowlist, so it only answers requests from the
-known, fixed set of machines it's meant to serve. That's access control,
-but not authentication: it's based on where a request comes from, not a
-credential proving who sent it. The Linux tool that actually talks to Tang
-(`clevis`) has no way to send a credential anyway, so network origin is
-the only thing there is to check.
+*Authorization*: Tang has no authorization. This is deliberate - any
+credential a client machine could issue would need to be stored on the
+machine and therefore potentially compromised by an attacker that has a copy
+of the machine's data.
+
+*Access control*: Tang is expected to be run on a trusted network, one that
+an attacker does not have access to. Since a Cloudflare-hosted Tang can have
+requests made to it from the entire Internet it is vital to provide a list
+of CIDRs from which requests are expected to be made. If an attacker can
+make a request from one of these addresses, then NBDE will provide no
+protection.
+
+## Required configuration
+
+In order to deploy, two pieces of information are needed:
+
+- A list of CIDRs which should be allowed to make requests to Tang. Both
+  IPv4 and IPv6 are supported. Ideally these are restricted to a set of
+  fixed IPs that your servers are located at.
+
+- A list of key sets. Each key set consists of a signing key (`sig`) and an
+  exchange key (`exc`). Tang advertises a single key set, but can serve
+  requests for a number of retired key sets as well, in order to aid key
+  rotation.
+
+The active key set and the list of retired Tang key sets are stored as a
+single JSON file. The `keygen` tool is provided which can generate and
+rotate key sets. It is strongly recommended that you keep a copy of this
+file somewhere safe (like a password manager). If this file is lost, any
+client bound to those keys will be permanently unable to unlock. The list of
+Tang key sets is stored in a Cloudflare secret, so it is non-trivial to
+retrieve a copy. Also consider adding a separate key for any encrypted data
+that is fully independent of Tang.
 
 ## Setup
 
@@ -63,7 +81,7 @@ the only thing there is to check.
 - A Cloudflare account
 - Node.js/npm (for `wrangler`, Cloudflare's deployment tool) and a Rust
   toolchain
-- The machine this Worker will unlock, reachable at a known IP address
+- The machines this Worker will unlock, and their IPs.
 
 ### 2. Install dependencies
 
@@ -71,13 +89,17 @@ the only thing there is to check.
 npm install
 ```
 
-### 3. Generate the Tang keys
+### 3. Generate and upload the Tang keys
+
+Note that `keygen` never edits a file directly. Its output must be
+redirected to a file. *Do not redirect output to the input file as that
+would cause it to be erased if the command errored.*
 
 ```sh
 cargo run --bin keygen -- generate > tang-keys.json
 ```
 
-This generates the current generation's two keys and prints them as one JSON
+This generates the current generation's key set and renders it as one JSON
 file. Both this and `rotate` (below) take an optional `--note <remark>`,
 recorded with the generation and shown later by `list`, e.g. `--note "annual
 rotation"`. There's no way to recover the keys if they're lost, so before
@@ -87,10 +109,10 @@ anything else:
    backup.
 2. Upload it to Cloudflare: `npm run upload-key`. This first validates the
    file with `check-key`, which checks each key's cryptographic validity
-   more thoroughly than the Worker ever does on a live request, catching a
+   more thoroughly than the Worker does on a live request, catching a
    corrupt or malformed key before it ever reaches Cloudflare. Takes a path
-   other than `tang-keys.json`, e.g. `npm run upload-key -- rotated-keys.json`,
-   if the file isn't under that name.
+   e.g. `npm run upload-key -- rotated-keys.json`, if the file isn't under
+   `tang-keys.json`.
 3. Delete the local file.
 
 To rotate the keys later:
@@ -137,30 +159,23 @@ Paste the printed `id` into `wrangler.toml`'s `[[kv_namespaces]]` block, in
 place of `REPLACE_WITH_NAMESPACE_ID`. A one-time step: every future deploy
 reuses the same namespace once its `id` is there.
 
-`wrangler.toml` also declares a per-IP rate limit (60 requests/minute), a
-backstop against one source — an allowed IP with a retry-loop bug, or a
-disallowed one probing — repeatedly paying for the KV read and whatever
-follows it. Nothing to set up here: it takes effect straight from this
-file once deployed.
+`wrangler.toml` also declares a per-IP rate limit (60 requests/minute). This
+is more of a protection against a buggy client than a DOS attack as a
+client could still consume significant request budget.
 
-### 5. Set the allowed IP address
+### 5. Set the allowed IP addresses
 
 ```sh
-npm run set-allowlist -- 203.0.113.4/32
+npm run set-allowlist -- "198.51.100.7, 203.0.113.0/24, 2001:db8::1"
 ```
 
-The real IP address, or comma-separated CIDR ranges, of the machine(s) this
-Worker will serve. It's set directly in Cloudflare's KV store, independent
-of `wrangler.toml` and of any deploy, so the VPS's real IP never ends up
-committed to this repo, and changing it later doesn't need a redeploy.
+The allow list comprises comma-separated CIDR ranges or IPs of the
+machine(s) this Worker will serve. It's set directly in Cloudflare's KV
+store, independent of `wrangler.toml` and of any deploy so the list can be
+updated without a redeploy.
+
 `npm run get-allowlist` reads the current value back, if you ever need to
 check it.
-
-`npm run set-allowlist` first validates the list with `check-allowlist`,
-the same parser the Worker itself uses, since the Worker's own parsing
-silently drops any entry that fails to parse rather than failing the whole
-request. A typo here would otherwise go unnoticed until the VPS actually
-needs to unlock.
 
 ### 6. Deploy
 
@@ -168,12 +183,14 @@ needs to unlock.
 npm run deploy
 ```
 
-### 7. Point the VPS at it
+The URL of the worker will be printed during this step.
+
+### 7. Point any clients at Tang
 
 On the machine being unlocked, `clevis` needs pointing at this Worker's
 `*.workers.dev` URL (or a custom domain) as its Tang server. That side of
 the setup (Clevis, the disk encryption itself, and the boot-time unlock
-script) lives elsewhere; this repo is only the server.
+script) is beyond the scope of this README.
 
 ## Local development
 
@@ -189,21 +206,7 @@ Needs its own local `TANG_KEYS` secret (see Cloudflare's docs on
 npx wrangler kv key put --binding=ALLOWED_CIDRS_KV --local cidrs 203.0.113.4/32
 ```
 
-## Security notes
-
-Losing the keys is unrecoverable by design: Tang has no backdoor, so there's
-no way to reconstruct them, for you or anyone else. That's also what makes
-it safe to let a third party (Cloudflare) hold them. Cloudflare gets the
-keys, but the wrapped key on the VPS's disk never touches Cloudflare at all.
-Neither half is useful without the other.
-
-The IP allowlist narrows who can even ask. Without it, anyone who ever got a
-copy of the VPS's disk (an old backup, a stolen snapshot) could complete the
-unlock from anywhere, since Tang itself doesn't check who's asking. With it,
-they'd also need to be making that request from the VPS's own network
-address, which a copy of a disk alone doesn't get them.
-
-## Known issues
+## Implementation notes
 
 `tangy-lib` parses its input with bare `.unwrap()`s rather than returning
 errors for malformed input ([rustfoo/tangy-lib#8][tangy-lib-panics]), which
@@ -215,16 +218,14 @@ request body that's the right shape but not an actual point on the curve
 before it ever reaches `tangy-lib`, so a client can't trigger this.
 
 For the `TANG_KEYS` secret itself, there's no equivalent check on the live
-request path: `check_tangy_keys` (the same validation, including the
-exchange key's public point matching its own private scalar) only runs in
-`check-key.rs` at upload time (see [step 3](#3-generate-the-tang-keys)), not
-again on every `/adv`/`/rec` call. A `TANG_KEYS` value set without going
-through that script, or corrupted after being set, can still panic the
-Worker. Re-validating on every request would roughly double its CPU cost
-(deriving a public key from a private scalar to check it against the stored
-one is a full scalar multiplication, the same cost as the ECDH operation
-`/rec` already does), so this relies on always setting `TANG_KEYS` via the
-upload script rather than on a runtime check.
+request path: `check_tangy_keys` (the same validation, including the exchange
+key's public point matching its own private scalar) only runs in `check-key` at
+upload time, not again on every `/adv`/`/rec` call. 
+
+A `TANG_KEYS` secret set without going through that script, or corrupted after
+being set, can still panic the Worker. Re-validating on every request would
+roughly double its CPU cost, so this relies on always setting
+`TANG_KEYS` via the upload script.
 
 [tangy-lib-panics]: https://github.com/rustfoo/tangy-lib/issues/8
 
