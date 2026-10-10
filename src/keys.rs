@@ -20,11 +20,11 @@ pub const SIGNING_KEY_ALG: &str = "ES512";
 /// generated key set.
 pub const EXCHANGE_KEY_ALG: &str = "ECMR";
 
-/// The P-521 curve's generator point, in the same JWK coordinate encoding
-/// as a request body. Used below purely as a throwaway but genuinely
-/// on-curve point: its value doesn't matter, only that it's valid. Read
-/// off `p521::ProjectivePoint::generator()` rather than transcribed from
-/// a spec, avoiding a transcription error in a 521-bit literal.
+/// A genuinely on-curve P-521 point, in the same JWK coordinate encoding
+/// as a request body, used below purely as a throwaway: which point
+/// doesn't matter, only that it's valid. The curve's generator point,
+/// read off `p521::ProjectivePoint::generator()` rather than transcribed
+/// from a spec.
 pub(crate) const GENERATOR_X: &str =
     "AMaFjga3BATpzZ4-y2YjlbRCnGSBOQU_tSH4KK9ga009uqFLXnfv51ko_h3BJ6L_qN4zSLPBhWpCm_l-fjHC5b1m";
 pub(crate) const GENERATOR_Y: &str =
