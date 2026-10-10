@@ -6,8 +6,10 @@
 //! independent of any code deploy, and never has to live in a local file
 //! or in `wrangler.toml`.
 
+use std::result::Result;
+
 use ipnetwork::IpNetwork;
-use worker::*;
+use worker::{Env, Request};
 
 mod header_names {
     use http::HeaderName;
@@ -36,39 +38,45 @@ fn get_client_ip(req: &Request) -> Option<String> {
 /// Splits a comma-separated CIDR list into trimmed, non-empty entries.
 fn cidr_entries(raw: &str) -> impl Iterator<Item = &str> { raw.split(',').map(str::trim).filter(|s| !s.is_empty()) }
 
-/// Parses the comma-separated CIDR list read from `ALLOWED_CIDRS_KV`. An
-/// entry that fails to parse is dropped rather than failing the whole
-/// request, so one typo doesn't take the Worker down. An empty result
-/// still fails every request closed, since `ip_allowed` treats "no ranges"
-/// as "nothing matches".
-fn parse_cidr_list(raw: &str) -> Vec<IpNetwork> { cidr_entries(raw).filter_map(|s| s.parse().ok()).collect() }
+/// The CIDR ranges read from `ALLOWED_CIDRS_KV`: who's allowed to reach
+/// `/adv` and `/rec`.
+pub struct AllowList(Vec<IpNetwork>);
 
-/// Checks that every entry in a comma-separated CIDR list parses, unlike
-/// `parse_cidr_list`, which silently drops a bad one so a single typo
-/// doesn't take the Worker down for every other entry. Used by
-/// `check-allowlist` to catch that typo before it's ever set as
-/// `ALLOWED_CIDRS_KV`'s value, where it would otherwise go unnoticed until
-/// the VPS can't unlock.
-pub fn check_cidr_list(raw: &str) -> std::result::Result<(), String> {
-    let mut any = false;
-    for entry in cidr_entries(raw) {
-        any = true;
-        entry.parse::<IpNetwork>().map_err(|e| format!("{entry:?} is not a valid CIDR: {e}"))?;
-    }
-    if any {
-        Ok(())
-    } else {
-        Err("no CIDR entries found".to_string())
+impl AllowList {
+    /// True if `ip` falls within one of `self`'s ranges.
+    fn allows(&self, ip: std::net::IpAddr) -> bool { self.0.iter().any(|net| net.contains(ip)) }
+}
+
+/// Parses a comma-separated CIDR list, rejecting the whole thing if any
+/// entry fails to parse or none are given. Used both by `authorized`
+/// (which denies every request on an `Err`, the same as a missing KV
+/// value) and by `check-allowlist` before a list is ever written to
+/// `ALLOWED_CIDRS_KV`. A lenient parse that dropped bad entries instead
+/// would be worse for both: silently losing an intended entry from a live
+/// allowlist is easy to miss, where the VPS failing to unlock from a
+/// rejected list is not.
+impl std::str::FromStr for AllowList {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        let mut entries = Vec::new();
+        for entry in cidr_entries(raw) {
+            entries.push(entry.parse::<IpNetwork>().map_err(|e| format!("{entry:?} is not a valid CIDR: {e}"))?);
+        }
+        if entries.is_empty() {
+            return Err("no CIDR entries found".to_string());
+        }
+        Ok(AllowList(entries))
     }
 }
 
-/// True if `req`'s `CF-Connecting-IP` falls within one of `allowed`. Fails
-/// closed: a missing or unparseable header is treated as not allowed.
-fn ip_allowed(req: &Request, allowed: &[IpNetwork]) -> bool {
+/// True if `req`'s `CF-Connecting-IP` is in `allowed`. Fails closed: a
+/// missing or unparseable header is treated as not allowed.
+fn ip_allowed(req: &Request, allowed: &AllowList) -> bool {
     let Some(ip) = get_client_ip(req).and_then(|s| s.parse().ok()) else {
         return false;
     };
-    allowed.iter().any(|net| net.contains(ip))
+    allowed.allows(ip)
 }
 
 /// True if `req`'s source IP is still within `RATE_LIMIT_BINDING`'s
@@ -90,9 +98,9 @@ pub(crate) async fn authorized(req: &Request, env: &Env) -> bool {
         return false;
     }
     let Ok(kv) = env.kv(ALLOWED_CIDRS_KV_BINDING) else { return false };
-    let Ok(Some(allowed_cidrs)) = kv.get(ALLOWED_CIDRS_KV_KEY).text().await else { return false };
-    let allowed = parse_cidr_list(&allowed_cidrs);
-    !allowed.is_empty() && ip_allowed(req, &allowed)
+    let Ok(Some(raw)) = kv.get(ALLOWED_CIDRS_KV_KEY).text().await else { return false };
+    let Ok(allowed) = raw.parse::<AllowList>() else { return false };
+    ip_allowed(req, &allowed)
 }
 
 #[cfg(test)]
@@ -100,46 +108,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_cidr_list_parses_each_valid_entry() {
-        let allowed = parse_cidr_list("203.0.113.0/24, 198.51.100.0/24");
+    fn test_allow_list_parses_each_valid_entry() {
+        let allowed: AllowList = "203.0.113.0/24, 198.51.100.0/24".parse().unwrap();
         for ip in ["203.0.113.5", "198.51.100.5"] {
-            let addr = ip.parse().expect("test address literal must parse");
-            assert!(allowed.iter().any(|net| net.contains(addr)), "ip: {ip}");
+            assert!(allowed.allows(ip.parse().expect("test address literal must parse")), "ip: {ip}");
         }
     }
 
     #[test]
-    fn test_parse_cidr_list_drops_unparseable_entries_but_keeps_the_rest() {
-        let allowed = parse_cidr_list("not-a-cidr, 203.0.113.0/24");
-        let addr = "203.0.113.1".parse().expect("test address literal must parse");
-        assert_eq!(allowed.len(), 1);
-        assert!(allowed[0].contains(addr));
+    fn test_allow_list_trims_surrounding_whitespace() {
+        let allowed: AllowList = "  203.0.113.0/24 ,198.51.100.0/24  ".parse().unwrap();
+        for ip in ["203.0.113.5", "198.51.100.5"] {
+            assert!(allowed.allows(ip.parse().expect("test address literal must parse")), "ip: {ip}");
+        }
     }
 
     #[test]
-    fn test_parse_cidr_list_empty_input_yields_no_ranges() {
-        assert!(parse_cidr_list("").is_empty());
+    fn test_allow_list_rejects_a_single_bad_entry_even_among_good_ones() {
+        assert!("203.0.113.0/24, not-a-cidr".parse::<AllowList>().is_err());
     }
 
     #[test]
-    fn test_parse_cidr_list_trims_surrounding_whitespace() {
-        let allowed = parse_cidr_list("  203.0.113.0/24 ,198.51.100.0/24  ");
-        assert_eq!(allowed.len(), 2);
-    }
-
-    #[test]
-    fn test_check_cidr_list_accepts_every_valid_entry() {
-        assert!(check_cidr_list("203.0.113.0/24, 198.51.100.0/24").is_ok());
-    }
-
-    #[test]
-    fn test_check_cidr_list_rejects_a_single_bad_entry_even_among_good_ones() {
-        assert!(check_cidr_list("203.0.113.0/24, not-a-cidr").is_err());
-    }
-
-    #[test]
-    fn test_check_cidr_list_rejects_empty_input() {
-        assert!(check_cidr_list("").is_err());
-        assert!(check_cidr_list("   ").is_err());
+    fn test_allow_list_rejects_empty_input() {
+        assert!("".parse::<AllowList>().is_err());
+        assert!("   ".parse::<AllowList>().is_err());
     }
 }

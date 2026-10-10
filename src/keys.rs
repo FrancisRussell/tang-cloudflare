@@ -1,5 +1,8 @@
+use std::result::Result;
+
 use base64ct::Encoding;
 use http::StatusCode;
+use serde::{Deserialize, Serialize};
 use tangy_lib::{KeySource, MyJwkEcKey, TangyLib};
 use worker::Env;
 
@@ -17,9 +20,23 @@ pub const SIGNING_KEY_ALG: &str = "ES512";
 /// generated key set.
 pub const EXCHANGE_KEY_ALG: &str = "ECMR";
 
+/// The P-521 curve's generator point, in the same JWK coordinate encoding
+/// as a request body. Used below purely as a throwaway but genuinely
+/// on-curve point: its value doesn't matter, only that it's valid. Read
+/// off `p521::ProjectivePoint::generator()` rather than transcribed from
+/// a spec, avoiding a transcription error in a 521-bit literal.
+pub(crate) const GENERATOR_X: &str =
+    "AMaFjga3BATpzZ4-y2YjlbRCnGSBOQU_tSH4KK9ga009uqFLXnfv51ko_h3BJ6L_qN4zSLPBhWpCm_l-fjHC5b1m";
+pub(crate) const GENERATOR_Y: &str =
+    "ARg5KWp4mjvABFyKX7QsfRvZmPVESVebRGgXr70XJz5mLJfucple9CZAxVC5AT-tB2E1PHCGonLCQIi-lHaf0WZQ";
+
+/// A P-521 field element's encoded length: 521 bits, rounded up to whole
+/// bytes.
+pub(crate) const P521_COORDINATE_BYTE_LEN: usize = 66;
+
 /// One generation of Tang keys, generated and retired as a unit since
 /// `sig`+`exc` are always minted together in one `keygen`/`rotate` call.
-#[derive(Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct KeyGeneration {
     pub sig: MyJwkEcKey,
     pub exc: MyJwkEcKey,
@@ -46,7 +63,7 @@ impl std::fmt::Debug for KeyGeneration {
 impl KeyGeneration {
     /// Serializes `self`'s two keys back to the raw JWK JSON strings
     /// `TangyLib::init` takes.
-    fn to_jwk_strings(&self) -> std::result::Result<[String; 2], String> {
+    fn to_jwk_strings(&self) -> Result<[String; 2], String> {
         Ok([
             serde_json::to_string(&self.sig).map_err(|e| format!("signing key: {e}"))?,
             serde_json::to_string(&self.exc).map_err(|e| format!("exchange key: {e}"))?,
@@ -59,9 +76,7 @@ impl KeyGeneration {
     /// request's `kid` actually matched (see `TangKeys::find_generation`),
     /// keeping that cost constant regardless of how many retired
     /// generations exist.
-    pub(crate) fn build_rec_tangy(&self) -> std::result::Result<TangyLib, String> {
-        build_rec_tangy_from(std::iter::once(self))
-    }
+    pub(crate) fn build_rec_tangy(&self) -> Result<TangyLib, String> { build_rec_tangy_from(std::iter::once(self)) }
 }
 
 /// The `TANG_KEYS` secret's JSON shape: exactly one advertised generation
@@ -69,7 +84,7 @@ impl KeyGeneration {
 /// already-bound disk can keep completing `/rec` after a rotation.
 /// `retired` is newest-first, so pruning the oldest is a pop from the
 /// back.
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TangKeys {
     pub current: KeyGeneration,
     #[serde(default)]
@@ -80,7 +95,7 @@ pub struct TangKeys {
 impl std::str::FromStr for TangKeys {
     type Err = String;
 
-    fn from_str(raw: &str) -> std::result::Result<Self, Self::Err> {
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
         serde_json::from_str(raw).map_err(|e| format!("not valid JSON: {e}"))
     }
 }
@@ -108,7 +123,7 @@ impl TangKeys {
     /// current and retiring whatever was current instead) can legitimately
     /// leave `current` older than some retired generations, so that's not
     /// itself a sign of corruption.
-    fn check_retired_order(&self) -> std::result::Result<(), String> {
+    fn check_retired_order(&self) -> Result<(), String> {
         for (index, (newer, older)) in self.retired.iter().zip(self.retired.iter().skip(1)).enumerate() {
             if older.created_at >= newer.created_at {
                 return Err(format!(
@@ -128,7 +143,7 @@ impl TangKeys {
     /// shared instance with a visibility flag, since tangy-lib itself has
     /// no advertised-vs-hidden concept: every key it's given is advertised
     /// unconditionally.
-    pub(crate) fn build_adv_tangy(&self) -> std::result::Result<TangyLib, String> {
+    pub(crate) fn build_adv_tangy(&self) -> Result<TangyLib, String> {
         build_rec_tangy_from(std::iter::once(&self.current))
     }
 
@@ -138,7 +153,7 @@ impl TangKeys {
     /// generation at a time (see `KeyGeneration::build_rec_tangy`), since
     /// a request's `kid` only ever needs the single generation it
     /// matched.
-    fn build_rec_tangy_all(&self) -> std::result::Result<TangyLib, String> { build_rec_tangy_from(self.generations()) }
+    fn build_rec_tangy_all(&self) -> Result<TangyLib, String> { build_rec_tangy_from(self.generations()) }
 
     /// Validates a `TANG_KEYS` JSON more thoroughly than parsing it alone.
     /// Checks `retired`'s order (see `check_retired_order`), every key's
@@ -152,7 +167,7 @@ impl TangKeys {
     /// standing in for the client's half of the exchange. Used by
     /// `check-key`; the Worker itself has no reason to run any of these
     /// checks on every request.
-    pub fn validate(&self) -> std::result::Result<(), String> {
+    pub fn validate(&self) -> Result<(), String> {
         self.check_retired_order()?;
         for generation in self.generations() {
             check_key_point_matches_scalar(&generation.sig)
@@ -175,7 +190,7 @@ impl TangKeys {
     /// computation, so there's no benefit to caching it across
     /// requests/isolates. Discards the specific parse error, rather than
     /// exposing key-handling details to the client.
-    pub(crate) fn load_from_env(env: &Env) -> std::result::Result<TangKeys, StatusCode> {
+    pub(crate) fn load_from_env(env: &Env) -> Result<TangKeys, StatusCode> {
         let raw = env.secret(TANG_KEYS_SECRET).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?.to_string();
         raw.parse().map_err(|_: String| StatusCode::INTERNAL_SERVER_ERROR)
     }
@@ -187,9 +202,7 @@ impl TangKeys {
 /// `validate`), so each handler only pays for the one it needs: building
 /// either one performs a real signature per signing key, via
 /// `TangyLib::init`'s own precomputed advertisement.
-fn build_rec_tangy_from<'a>(
-    generations: impl Iterator<Item = &'a KeyGeneration>,
-) -> std::result::Result<TangyLib, String> {
+fn build_rec_tangy_from<'a>(generations: impl Iterator<Item = &'a KeyGeneration>) -> Result<TangyLib, String> {
     let mut rec_keys = Vec::new();
     for generation in generations {
         rec_keys.extend(generation.to_jwk_strings()?);
@@ -197,20 +210,6 @@ fn build_rec_tangy_from<'a>(
     let rec_refs: Vec<&str> = rec_keys.iter().map(String::as_str).collect();
     TangyLib::init(KeySource::Vector(&rec_refs)).map_err(|e| e.to_string())
 }
-
-/// The P-521 curve's generator point, in the same JWK coordinate encoding
-/// as a request body. Used below purely as a throwaway but genuinely
-/// on-curve point: its value doesn't matter, only that it's valid. Read
-/// off `p521::ProjectivePoint::generator()` rather than transcribed from
-/// a spec, avoiding a transcription error in a 521-bit literal.
-pub(crate) const GENERATOR_X: &str =
-    "AMaFjga3BATpzZ4-y2YjlbRCnGSBOQU_tSH4KK9ga009uqFLXnfv51ko_h3BJ6L_qN4zSLPBhWpCm_l-fjHC5b1m";
-pub(crate) const GENERATOR_Y: &str =
-    "ARg5KWp4mjvABFyKX7QsfRvZmPVESVebRGgXr70XJz5mLJfucple9CZAxVC5AT-tB2E1PHCGonLCQIi-lHaf0WZQ";
-
-/// A P-521 field element's encoded length: 521 bits, rounded up to whole
-/// bytes.
-pub(crate) const P521_COORDINATE_BYTE_LEN: usize = 66;
 
 /// Decodes `x`/`y` as base64url and checks the resulting point is
 /// actually on the P-521 curve, returning it if so. Shared by
@@ -249,7 +248,7 @@ pub(crate) fn decode_ec_point(x: &str, y: &str) -> Option<p521::PublicKey> {
 /// `.unwrap()` on a mismatch. Catching that here, with an exact-length
 /// decode of `d` free of the padding ambiguity `tangy-lib`'s own decode
 /// has, is what lets `TangKeys::validate` run without `catch_unwind`.
-fn check_key_point_matches_scalar(key: &MyJwkEcKey) -> std::result::Result<(), String> {
+fn check_key_point_matches_scalar(key: &MyJwkEcKey) -> Result<(), String> {
     let claimed = decode_ec_point(&key.x, &key.y)
         .ok_or_else(|| "public point is not a valid, on-curve P-521 point".to_string())?;
 
@@ -323,9 +322,7 @@ mod tests {
     }
 
     /// Parses and validates `raw`, as `check-key` does in one step.
-    fn parse_and_validate(raw: &str) -> std::result::Result<(), String> {
-        raw.parse::<TangKeys>().and_then(|keys| keys.validate())
-    }
+    fn parse_and_validate(raw: &str) -> Result<(), String> { raw.parse::<TangKeys>().and_then(|keys| keys.validate()) }
 
     #[test]
     fn test_check_tangy_keys_accepts_a_genuinely_valid_key_set() {

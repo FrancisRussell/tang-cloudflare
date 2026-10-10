@@ -19,7 +19,7 @@ mod access_control;
 mod handlers;
 mod keys;
 
-pub use access_control::check_cidr_list;
+pub use access_control::AllowList;
 pub use keys::{KeyGeneration, TangKeys, EXCHANGE_KEY_ALG, SIGNING_KEY_ALG};
 
 /// The Worker's HTTP entry point, routing to `/adv` and `/rec/:kid`.
