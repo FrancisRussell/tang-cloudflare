@@ -134,13 +134,28 @@ fn content_type_headers(value: &str) -> Headers {
 
 /// One generation of Tang keys, generated and retired as a unit since
 /// `sig`+`exc` are always minted together in one `keygen`/`rotate` call.
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
 pub struct KeyGeneration {
     pub sig: MyJwkEcKey,
     pub exc: MyJwkEcKey,
     pub created_at: chrono::DateTime<chrono::Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+}
+
+/// Hand-written rather than derived so `sig`/`exc` (each holding a private
+/// scalar in `MyJwkEcKey`'s own, unredacted `Debug`) never end up in a
+/// panic message or log line, which `console_error_panic_hook` would
+/// otherwise forward verbatim to Cloudflare's live logs.
+impl std::fmt::Debug for KeyGeneration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KeyGeneration")
+            .field("sig", &"<redacted>")
+            .field("exc", &"<redacted>")
+            .field("created_at", &self.created_at)
+            .field("note", &self.note)
+            .finish()
+    }
 }
 
 /// The `TANG_KEYS` secret's JSON shape: exactly one advertised generation
