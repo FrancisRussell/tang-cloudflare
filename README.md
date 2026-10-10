@@ -203,6 +203,31 @@ unlock from anywhere, since Tang itself doesn't check who's asking. With it,
 they'd also need to be making that request from the VPS's own network
 address, which a copy of a disk alone doesn't get them.
 
+## Known issues
+
+`tangy-lib` parses its input with bare `.unwrap()`s rather than returning
+errors for malformed input ([rustfoo/tangy-lib#8][tangy-lib-panics]), which
+panics the Worker and can corrupt isolate state shared with other requests
+rather than just failing the one request.
+
+For `/adv` and `/rec`, this is worked around: `decode_ec_point` rejects a
+request body that's the right shape but not an actual point on the curve
+before it ever reaches `tangy-lib`, so a client can't trigger this.
+
+For the `TANG_KEYS` secret itself, there's no equivalent check on the live
+request path: `check_tangy_keys` (the same validation, including the
+exchange key's public point matching its own private scalar) only runs in
+`check-key.rs` at upload time (see [step 3](#3-generate-the-tang-keys)), not
+again on every `/adv`/`/rec` call. A `TANG_KEYS` value set without going
+through that script, or corrupted after being set, can still panic the
+Worker. Re-validating on every request would roughly double its CPU cost
+(deriving a public key from a private scalar to check it against the stored
+one is a full scalar multiplication, the same cost as the ECDH operation
+`/rec` already does), so this relies on always setting `TANG_KEYS` via the
+upload script rather than on a runtime check.
+
+[tangy-lib-panics]: https://github.com/rustfoo/tangy-lib/issues/8
+
 ## License
 
 Dual-licensed under [MIT](./LICENSE-MIT) or [Apache-2.0](./LICENSE-APACHE).
