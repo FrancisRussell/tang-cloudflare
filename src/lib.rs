@@ -28,6 +28,15 @@ mod header_names {
     pub const CF_CONNECTING_IP: HeaderName = HeaderName::from_static("cf-connecting-ip");
 }
 
+mod content_types {
+    /// `/adv`'s content type in the Tang wire protocol, matching the
+    /// reference `tangy` server.
+    pub const JOSE_JSON: &str = "application/jose+json";
+    /// `/rec`'s content type in the Tang wire protocol, matching the
+    /// reference `tangy` server.
+    pub const JWK_JSON: &str = "application/jwk+json";
+}
+
 /// KV namespace holding a comma-separated CIDR list (v4 and/or v6) of who's
 /// allowed to reach `/adv` and `/rec`: the VPS(es) this Tang instance
 /// actually serves, and the sole access control (Clevis, the client, sends
@@ -124,12 +133,6 @@ fn error_response(status: StatusCode) -> Result<Response> {
     Response::error(status.canonical_reason().expect("standard status code has a canonical reason"), status.as_u16())
 }
 
-/// `/adv`'s content type in the Tang wire protocol, matching the reference
-/// `tangy` server.
-const JOSE_JSON: &str = "application/jose+json";
-/// `/rec`'s content type in the Tang wire protocol, matching the reference
-/// `tangy` server.
-const JWK_JSON: &str = "application/jwk+json";
 /// The route pattern's named parameter for the recovery key ID, and the key
 /// `ctx.param` looks it up by, kept as one constant so the two can't drift
 /// apart silently.
@@ -147,7 +150,9 @@ pub const EXCHANGE_KEY_ALG: &str = "ECMR";
 /// A `Headers` with a single `content-type` entry set to `value`.
 fn content_type_headers(value: &str) -> Headers {
     let headers = Headers::new();
-    headers.set("content-type", value).expect("static header name and value are valid");
+    headers
+        .set(http::header::CONTENT_TYPE.as_str(), value)
+        .expect("static header name and value are valid");
     headers
 }
 
@@ -395,7 +400,7 @@ async fn handle_adv(req: Request, ctx: RouteContext<()>) -> Result<Response> {
     };
     let Ok(adv) = build_adv_tangy(&keys) else { return error_response(StatusCode::INTERNAL_SERVER_ERROR) };
     match adv.adv(None) {
-        Ok(body) => Ok(Response::ok(body)?.with_headers(content_type_headers(JOSE_JSON))),
+        Ok(body) => Ok(Response::ok(body)?.with_headers(content_type_headers(content_types::JOSE_JSON))),
         Err(_) => error_response(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
@@ -436,7 +441,7 @@ async fn handle_rec(mut req: Request, ctx: RouteContext<()>) -> Result<Response>
         return error_response(StatusCode::INTERNAL_SERVER_ERROR);
     };
     match rec.rec(&kid, &body) {
-        Ok(body) => Ok(Response::ok(body)?.with_headers(content_type_headers(JWK_JSON))),
+        Ok(body) => Ok(Response::ok(body)?.with_headers(content_type_headers(content_types::JWK_JSON))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => error_response(StatusCode::NOT_FOUND),
         Err(_) => error_response(StatusCode::INTERNAL_SERVER_ERROR),
     }
