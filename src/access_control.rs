@@ -1,3 +1,11 @@
+//! `/adv` and `/rec`'s access control: an IP allowlist plus a per-IP rate
+//! limit. The allowlist is the sole access control here, not a supplement
+//! to some other credential: Clevis, the client, sends no header beyond
+//! `Content-Type` and has no config option to add one. It's read from KV
+//! rather than a var or secret, so it's set with `wrangler kv key put`,
+//! independent of any code deploy, and never has to live in a local file
+//! or in `wrangler.toml`.
+
 use ipnetwork::IpNetwork;
 use worker::*;
 
@@ -10,15 +18,8 @@ mod header_names {
     pub const CF_CONNECTING_IP: HeaderName = HeaderName::from_static("cf-connecting-ip");
 }
 
-/// KV namespace holding a comma-separated CIDR list (v4 and/or v6) of who's
-/// allowed to reach `/adv` and `/rec`: the VPS(es) this Tang instance
-/// actually serves, and the sole access control (Clevis, the client, sends
-/// no header beyond Content-Type and has no config option to add one, so
-/// there's no bearer credential to check alongside this). KV rather than a
-/// var or secret, so it's set with `wrangler kv key put`, independent of
-/// any code deploy, and never has to live in a local file or in
-/// wrangler.toml. Keep it as tight as the real network topology allows (a
-/// bare /32 or /128) unless there's a concrete reason to widen it.
+/// KV namespace holding the allowlist: a comma-separated CIDR list (v4
+/// and/or v6) of who's allowed to reach `/adv` and `/rec`.
 const ALLOWED_CIDRS_KV_BINDING: &str = "ALLOWED_CIDRS_KV";
 /// The single key `ALLOWED_CIDRS_KV` is read and written under.
 const ALLOWED_CIDRS_KV_KEY: &str = "cidrs";
