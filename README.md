@@ -218,14 +218,15 @@ request body that's the right shape but not an actual point on the curve
 before it ever reaches `tangy-lib`, so a client can't trigger this.
 
 For the `TANG_KEYS` secret itself, there's no equivalent check on the live
-request path: `check_tangy_keys` (the same validation, including the exchange
-key's public point matching its own private scalar) only runs in `check-key` at
-upload time, not again on every `/adv`/`/rec` call. 
+request path: `TangKeys::validate` (the same validation, including the
+exchange key's public point matching its own private scalar) only runs in
+`check-key` at upload time, not again on every `/adv`/`/rec` call.
 
 A `TANG_KEYS` secret set without going through that script, or corrupted after
 being set, can still panic the Worker. Re-validating on every request would
-roughly double its CPU cost, so this relies on always setting
-`TANG_KEYS` via the upload script.
+cost one real cryptographic operation per key generation, current and
+retired, so this relies on always setting `TANG_KEYS` via the upload script
+instead.
 
 [tangy-lib-panics]: https://github.com/rustfoo/tangy-lib/issues/8
 

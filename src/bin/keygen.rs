@@ -157,7 +157,9 @@ enum PruneSelector {
     /// `--keep`: keep only this many of the newest retired generations,
     /// removing the rest.
     Keep(usize),
+    /// `--older-than`: remove every retired generation older than this.
     OlderThan(chrono::Duration),
+    /// `--thumbprint`: remove one specific retired generation by it.
     Thumbprint(String),
 }
 

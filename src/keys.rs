@@ -34,6 +34,11 @@ pub(crate) const GENERATOR_Y: &str =
 /// bytes.
 pub(crate) const P521_COORDINATE_BYTE_LEN: usize = 66;
 
+/// A `/rec` request body wrapping `GENERATOR_X`/`GENERATOR_Y`.
+fn generator_point_json() -> String {
+    format!(r#"{{"kty":"EC","crv":"P-521","x":"{GENERATOR_X}","y":"{GENERATOR_Y}"}}"#)
+}
+
 /// One generation of Tang keys, generated and retired as a unit since
 /// `sig`+`exc` are always minted together in one `keygen`/`rotate` call.
 #[derive(Clone, Deserialize, Serialize)]
@@ -176,7 +181,7 @@ impl TangKeys {
                 .map_err(|e| format!("exchange key rejected (created {}): {e}", generation.created_at))?;
         }
         let rec = self.build_rec_tangy_all()?;
-        let dummy_request = format!(r#"{{"kty":"EC","crv":"P-521","x":"{GENERATOR_X}","y":"{GENERATOR_Y}"}}"#);
+        let dummy_request = generator_point_json();
         for generation in self.generations() {
             rec.rec(&generation.exc.thumbprint(), &dummy_request)
                 .map(|_| ())
@@ -364,7 +369,8 @@ mod tests {
         // exchange key) would accept this. check_key_point_matches_scalar
         // rejects it cleanly, via p521::SecretKey::from_slice's own
         // validation, well before tangy-lib ever sees it.
-        keys["current"]["exc"]["d"] = serde_json::Value::String(base64ct::Base64UrlUnpadded::encode_string(&[0u8; 66]));
+        keys["current"]["exc"]["d"] =
+            serde_json::Value::String(base64ct::Base64UrlUnpadded::encode_string(&[0u8; P521_COORDINATE_BYTE_LEN]));
         assert!(keys.to_string().parse::<TangKeys>().is_ok());
         assert!(parse_and_validate(&keys.to_string()).is_err());
     }
@@ -373,7 +379,8 @@ mod tests {
     fn test_check_tangy_keys_rejects_a_corrupted_retired_exchange_key() {
         let mut keys = valid_tang_keys_json();
         let mut retired = valid_key_generation_json();
-        retired["exc"]["d"] = serde_json::Value::String(base64ct::Base64UrlUnpadded::encode_string(&[0u8; 66]));
+        retired["exc"]["d"] =
+            serde_json::Value::String(base64ct::Base64UrlUnpadded::encode_string(&[0u8; P521_COORDINATE_BYTE_LEN]));
         keys["retired"] = serde_json::json!([retired]);
         assert!(parse_and_validate(&keys.to_string()).is_err());
     }
@@ -473,7 +480,7 @@ mod tests {
         keys_json["retired"] = serde_json::json!([retired]);
         let keys: TangKeys = keys_json.to_string().parse().expect("a valid TangKeys");
         let rec = keys.build_rec_tangy_all().expect("a valid key set must build");
-        let dummy_request = format!(r#"{{"kty":"EC","crv":"P-521","x":"{GENERATOR_X}","y":"{GENERATOR_Y}"}}"#);
+        let dummy_request = generator_point_json();
         assert!(rec.rec(&retired_thumbprint, &dummy_request).is_ok());
     }
 }

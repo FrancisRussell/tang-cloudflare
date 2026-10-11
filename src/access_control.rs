@@ -40,6 +40,7 @@ fn cidr_entries(raw: &str) -> impl Iterator<Item = &str> { raw.split(',').map(st
 
 /// The CIDR ranges read from `ALLOWED_CIDRS_KV`: who's allowed to reach
 /// `/adv` and `/rec`.
+#[derive(Debug, Clone)]
 pub struct AllowList(Vec<IpNetwork>);
 
 impl AllowList {
