@@ -1,5 +1,7 @@
 # tang-cloudflare
 
+[![CI](https://github.com/FrancisRussell/tang-cloudflare/actions/workflows/ci.yml/badge.svg)](https://github.com/FrancisRussell/tang-cloudflare/actions/workflows/ci.yml)
+
 A [Tang](https://github.com/latchset/tang) server, deployable as a Cloudflare
 Worker.
 
