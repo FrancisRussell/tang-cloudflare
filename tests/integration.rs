@@ -57,6 +57,10 @@ const JWK_JSON: &str = "application/jwk+json";
 /// the same reason as `JOSE_JSON`.
 const ALLOWED_CIDRS_KV_KEY: &str = "cidrs";
 
+/// The header the Worker reads the client IP from. Duplicated for the same
+/// reason as `JOSE_JSON`.
+const CF_CONNECTING_IP: &str = "CF-Connecting-IP";
+
 /// The CIDR this run's `ALLOWED_CIDRS_KV` is seeded with, and an address
 /// inside and outside it.
 const ALLOWED_CIDR: &str = "203.0.113.50/32";
@@ -258,12 +262,10 @@ impl WranglerDev {
     /// namespace declared in wrangler.toml.
     fn find_kv_namespace_id(&self) -> String {
         let url = format!("{}/cdn-cgi/local/explorer/api/storage/kv/namespaces", self.base_url());
-        let listing = ureq::get(&url)
-            .timeout(REQUEST_TIMEOUT)
+        let mut resp = with_test_config(ureq::get(&url))
             .call()
-            .unwrap_or_else(|e| panic!("wrangler dev's local explorer API is unavailable ({e}); is wrangler current?"))
-            .into_string()
-            .expect("the namespace listing is readable");
+            .unwrap_or_else(|e| panic!("wrangler dev's local explorer API is unavailable ({e}); is wrangler current?"));
+        let listing = resp.body_mut().read_to_string().expect("the namespace listing is readable");
         let after_id = listing.split_once("\"id\":\"").expect("the namespace listing has an id").1;
         after_id.split_once('"').expect("the id is quoted").0.to_string()
     }
@@ -277,9 +279,8 @@ impl WranglerDev {
             "{}/cdn-cgi/local/explorer/api/storage/kv/namespaces/{namespace_id}/values/{ALLOWED_CIDRS_KV_KEY}",
             self.base_url()
         );
-        ureq::put(&url)
-            .timeout(REQUEST_TIMEOUT)
-            .send_string(ALLOWED_CIDR)
+        with_test_config(ureq::put(&url))
+            .send(ALLOWED_CIDR)
             .unwrap_or_else(|e| panic!("seeding ALLOWED_CIDRS_KV via the local explorer API failed: {e}"));
     }
 
@@ -292,9 +293,9 @@ impl WranglerDev {
     fn wait_until_ready(&self) {
         let deadline = Instant::now() + READY_TIMEOUT;
         loop {
-            match ureq::get(&format!("{}/adv", self.base_url())).timeout(REQUEST_TIMEOUT).call() {
-                Ok(_) | Err(ureq::Error::Status(..)) => return,
-                Err(ureq::Error::Transport(_)) if Instant::now() < deadline => {
+            match with_test_config(ureq::get(&format!("{}/adv", self.base_url()))).call() {
+                Ok(_) => return,
+                Err(ureq::Error::Io(_)) if Instant::now() < deadline => {
                     std::thread::sleep(POLL_INTERVAL);
                 }
                 Err(e) => panic!("wrangler dev did not become ready: {e}\noutput:\n{}", self.captured_output()),
@@ -330,24 +331,28 @@ struct HttpResult {
     body: String,
 }
 
-/// Unwraps a `ureq` outcome into an `HttpResult`, treating an HTTP error
-/// status as an ordinary response rather than failing the test.
-fn to_result(outcome: Result<ureq::Response, ureq::Error>) -> HttpResult {
-    let resp = match outcome {
-        Ok(resp) | Err(ureq::Error::Status(_, resp)) => resp,
-        Err(e) => panic!("request failed: {e}"),
-    };
-    let status = StatusCode::from_u16(resp.status()).expect("ureq gives a valid status code");
-    let content_type = resp.header("content-type").map(str::to_owned);
-    let body = resp.into_string().expect("response body must be valid UTF-8");
+/// Applies this test file's shared HTTP call behaviour to a request: a
+/// bounded timeout, so a hung request fails clearly instead of hanging the
+/// test, and treating every status code as an ordinary response rather
+/// than an error, matching `to_result`'s own treatment of error statuses.
+fn with_test_config<S>(req: ureq::RequestBuilder<S>) -> ureq::RequestBuilder<S> {
+    req.config().timeout_global(Some(REQUEST_TIMEOUT)).http_status_as_error(false).build()
+}
+
+/// Unwraps a `ureq` outcome into an `HttpResult`.
+fn to_result(outcome: Result<http::Response<ureq::Body>, ureq::Error>) -> HttpResult {
+    let mut resp = outcome.unwrap_or_else(|e| panic!("request failed: {e}"));
+    let status = resp.status();
+    let content_type = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).map(str::to_owned);
+    let body = resp.body_mut().read_to_string().expect("response body must be valid UTF-8");
     HttpResult { status, content_type, body }
 }
 
 /// Sends a `GET /adv` request, optionally with a `CF-Connecting-IP` header.
 fn get_adv(dev: &WranglerDev, client_ip: Option<&str>) -> HttpResult {
-    let mut req = ureq::get(&format!("{}/adv", dev.base_url())).timeout(REQUEST_TIMEOUT);
+    let mut req = with_test_config(ureq::get(&format!("{}/adv", dev.base_url())));
     if let Some(ip) = client_ip {
-        req = req.set("CF-Connecting-IP", ip);
+        req = req.header(CF_CONNECTING_IP, ip);
     }
     to_result(req.call())
 }
@@ -355,11 +360,11 @@ fn get_adv(dev: &WranglerDev, client_ip: Option<&str>) -> HttpResult {
 /// Sends a `POST /rec/<kid>` request with `body`, optionally with a
 /// `CF-Connecting-IP` header.
 fn post_rec(dev: &WranglerDev, kid: &str, client_ip: Option<&str>, body: &str) -> HttpResult {
-    let mut req = ureq::post(&format!("{}/rec/{kid}", dev.base_url())).timeout(REQUEST_TIMEOUT);
+    let mut req = with_test_config(ureq::post(&format!("{}/rec/{kid}", dev.base_url())));
     if let Some(ip) = client_ip {
-        req = req.set("CF-Connecting-IP", ip);
+        req = req.header(CF_CONNECTING_IP, ip);
     }
-    to_result(req.send_string(body))
+    to_result(req.send(body))
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
