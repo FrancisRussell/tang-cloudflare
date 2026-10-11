@@ -5,6 +5,8 @@ edition = "2021"
 rust-version = "1.91"
 license = "MIT OR Apache-2.0"
 description = "Tang (Network-Bound Disk Encryption) server, deployed as a Cloudflare Worker."
+repository = "https://github.com/FrancisRussell/tang-cloudflare"
+readme = "README.md"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
