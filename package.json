@@ -11,6 +11,6 @@
     "get-allowlist": "wrangler kv key get --binding=ALLOWED_CIDRS_KV --remote cidrs"
   },
   "devDependencies": {
-    "wrangler": "^4.133.0"
+    "wrangler": "^4.149.0"
   }
 }
