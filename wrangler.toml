@@ -17,11 +17,11 @@ preview_urls = false
 # build, so there's no reason to compile its dependencies here.
 command = "cargo install -q --locked worker-build@0.8.6 && worker-build --release --no-default-features"
 
-# Created once with `wrangler kv namespace create tang-allowed-cidrs`; see
-# README.md. The id below isn't sensitive (an opaque per-account
-# identifier, not CIDR data), so it's fine to commit, unlike the CIDR list
-# itself. Left unset, a plain `wrangler deploy` would provision a fresh,
-# empty namespace on every deploy rather than reusing this one.
+# A placeholder: `scripts/deploy.sh` substitutes the real namespace id
+# into a generated copy (see wrangler.generated.toml, gitignored) rather
+# than this file, since the real id is specific to one Cloudflare account
+# and shouldn't be committed. See README.md for how the real namespace is
+# found or created.
 [[kv_namespaces]]
 binding = "ALLOWED_CIDRS_KV"
 id = "REPLACE_WITH_NAMESPACE_ID"

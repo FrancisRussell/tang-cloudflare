@@ -14,4 +14,6 @@ if [[ $# -ne 1 ]]; then
 fi
 
 (cd "$REPO_ROOT" && cargo run --quiet --bin check-allowlist -- "$1")
-(cd "$REPO_ROOT" && npx --no-install wrangler kv key put --binding=ALLOWED_CIDRS_KV --remote cidrs "$1")
+
+id="$("$SCRIPT_DIR/resolve-kv-namespace.sh")"
+(cd "$REPO_ROOT" && npx --no-install wrangler kv key put --namespace-id "$id" --remote cidrs "$1")

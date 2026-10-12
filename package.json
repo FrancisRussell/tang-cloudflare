@@ -5,10 +5,10 @@
   "description": "Tang (NBDE) server, deployed as a Cloudflare Worker.",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "WRANGLER_DISABLE_SUBDOMAIN_MIXED_STATE_CHECK=true wrangler deploy",
+    "deploy": "bash scripts/deploy.sh",
     "upload-key": "bash scripts/upload-key.sh",
     "set-allowlist": "bash scripts/set-allowlist.sh",
-    "get-allowlist": "wrangler kv key get --binding=ALLOWED_CIDRS_KV --remote cidrs --text"
+    "get-allowlist": "bash scripts/get-allowlist.sh"
   },
   "devDependencies": {
     "wrangler": "^4.149.0"

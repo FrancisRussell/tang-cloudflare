@@ -81,8 +81,8 @@ that is fully independent of Tang.
 ### 1. Prerequisites
 
 - A Cloudflare account
-- Node.js/npm (for `wrangler`, Cloudflare's deployment tool) and a Rust
-  toolchain
+- Node.js/npm (for `wrangler`, Cloudflare's deployment tool), a Rust
+  toolchain, and `jq`
 - The machines this Worker will unlock, and their IPs.
 
 ### 2. Install dependencies
@@ -166,43 +166,43 @@ and `thp` pin show; check it against this output before trusting a server.
 The exchange thumbprint is the `kid` that actually appears in `/rec/<kid>`
 URLs and server logs.
 
-### 4. Create the allowlist's KV namespace
+### 4. Set the allowed IP addresses
+
+By default the list of CIDRs allowed to access Tang is stored
+in a KV namespace with the name `tang-allowed-cidrs`. To
+customize this, create a `deploy.vars` file at the top-level
+defining your desired name.
 
 ```sh
-npx wrangler kv namespace create tang-allowed-cidrs
+KV_NAMESPACE_NAME='some-other-name'
 ```
 
-Paste the printed `id` into `wrangler.toml`'s `[[kv_namespaces]]` block, in
-place of `REPLACE_WITH_NAMESPACE_ID`. A one-time step: every future deploy
-reuses the same namespace once its `id` is there.
-
-`wrangler.toml` also declares a per-IP rate limit (60 requests/minute). This
-is more of a protection against a buggy client than a DOS attack as a
-client could still consume significant request budget.
-
-### 5. Set the allowed IP addresses
+To then set the allowlist, run the following command, customized
+with your desired CIDR ranges:
 
 ```sh
 npm run set-allowlist -- "198.51.100.7, 203.0.113.0/24, 2001:db8::1"
 ```
 
-The allow list comprises comma-separated CIDR ranges or IPs of the
-machine(s) this Worker will serve. It's set directly in Cloudflare's KV
-store, independent of `wrangler.toml` and of any deploy so the list can be
-updated without a redeploy.
+Until the allow-list is set, every request to the server will be rejected. The
+allow list comprises comma-separated CIDR ranges and IPs of machine(s) that
+should be able to acces the server. This can be set before or after deploying,
+and updated later without a redeploy. If the specified namespace does not exist
+it will be automatically created. `npm run get-allowlist` reads the current
+value back, if you ever need to check it.
 
-`npm run get-allowlist` reads the current value back, if you ever need to
-check it.
-
-### 6. Deploy
+### 5. Deploy
 
 ```sh
 npm run deploy
 ```
 
-The URL of the worker will be printed during this step.
+The URL of the worker will be printed during this step. `wrangler.toml`
+also declares a per-IP rate limit (60 requests/minute), applied as part of
+this deploy; it's more a protection against a buggy client than a DOS
+attack, since a client could still consume significant request budget.
 
-### 7. Verify it's working
+### 6. Verify it's working
 
 To do this `clevis` must be installed (`apt install clevis` on Debian/Ubuntu,
 `dnf install clevis` on Fedora). This will only work on a machine configured to
@@ -226,7 +226,7 @@ This calls `/rec` to derive the key back and should print `hello tang`.
 `test.jwe` itself isn't sensitive (it can't be decrypted without a live
 exchange with this Tang server), so no need to keep or securely delete it.
 
-### 8. Point any clients at Tang
+### 7. Point any clients at Tang
 
 On the machine being unlocked, `clevis` needs pointing at this Worker's
 `*.workers.dev` URL (or a custom domain) as its Tang server. That side of
