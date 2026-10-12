@@ -1,6 +1,13 @@
 name = "tang"
 main = "build/worker/shim.mjs"
 compatibility_date = "2026-09-22"
+# Required: this is the *.workers.dev URL Clevis is pointed at (see
+# README.md step 7).
+workers_dev = true
+# Each deployed version otherwise gets its own separate public hostname,
+# for testing a version before promoting it (gradual deployments). Nothing
+# here uses that, so there's no reason for the extra public endpoint.
+preview_urls = false
 
 [build]
 # worker-build is a Rust tool (not an npm package), pinned to the version
