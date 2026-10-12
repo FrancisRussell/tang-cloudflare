@@ -55,12 +55,13 @@ enum Command {
         /// "6months" (parsed by the `humantime` crate).
         #[arg(long, conflicts_with_all = ["keep", "thumbprint"])]
         older_than: Option<String>,
-        /// Remove one specific retired generation by its exchange key's
-        /// thumbprint.
+        /// Remove one specific retired generation by either its signing
+        /// or exchange key's thumbprint (see `list`).
         #[arg(long, conflicts_with_all = ["keep", "older_than"])]
         thumbprint: Option<String>,
     },
-    /// List every generation's thumbprint, creation time, and note.
+    /// List every generation's signing and exchange key thumbprints,
+    /// creation time, and note.
     List {
         /// Path to the existing `TANG_KEYS` JSON file.
         file: PathBuf,
@@ -98,19 +99,22 @@ fn read_tang_keys(path: &PathBuf) -> Result<TangKeys, String> {
 /// every printed line below appends.
 fn note_suffix(note: Option<&str>) -> String { note.map_or_else(String::new, |note| format!(" ({note})")) }
 
-/// Formats one generation's identifying info: its exchange key's
-/// thumbprint (the only identifier `prune --thumbprint` takes, and
-/// otherwise only discoverable via a bound client's own pinned copy,
-/// e.g. `clevis luks list`'s `thp`), creation time, and note if any.
+/// Formats one generation's identifying info, as a multi-line block:
+/// creation time and note on the first line, then both keys'
+/// thumbprints (either accepted by `prune --thumbprint`) on their own,
+/// indented lines. The signing key's is what a Clevis client's
+/// trust-on-first-use prompt and `thp` pin show; the exchange key's is
+/// the `kid` that actually appears in `/rec/<kid>` URLs and server logs.
 fn describe_generation(label: &str, generation: &KeyGeneration) -> String {
     // created_at's Display impl includes however many subsecond digits
     // the system clock reported, down to nanoseconds; seconds is all a
     // human reading this needs.
     let created_at = generation.created_at.format("%Y-%m-%d %H:%M:%S UTC");
     format!(
-        "{label}: thumbprint {}, created {created_at}{}",
+        "{label}: created {created_at}{}\n  signing thumbprint:  {}\n  exchange thumbprint: {}",
+        note_suffix(generation.note.as_deref()),
+        generation.sig.thumbprint(),
         generation.exc.thumbprint(),
-        note_suffix(generation.note.as_deref())
     )
 }
 
@@ -159,7 +163,8 @@ enum PruneSelector {
     Keep(usize),
     /// `--older-than`: remove every retired generation older than this.
     OlderThan(chrono::Duration),
-    /// `--thumbprint`: remove one specific retired generation by it.
+    /// `--thumbprint`: remove one specific retired generation by either
+    /// of its keys' thumbprints.
     Thumbprint(String),
 }
 
@@ -190,7 +195,9 @@ fn prune_keys(mut keys: TangKeys, selector: PruneSelector) -> Result<(TangKeys, 
             let index = keys
                 .retired
                 .iter()
-                .position(|generation| generation.exc.thumbprint() == thumbprint)
+                .position(|generation| {
+                    generation.sig.thumbprint() == thumbprint || generation.exc.thumbprint() == thumbprint
+                })
                 .ok_or_else(|| format!("no retired generation found with thumbprint {thumbprint:?}"))?;
             vec![keys.retired.remove(index)]
         }
@@ -226,8 +233,8 @@ fn prune(file: &PathBuf, selector: PruneSelector) -> Result<(), String> {
     eprintln!("pruned {} retired generation(s):", removed.len());
     for generation in &removed {
         eprintln!("{}", describe_generation("pruned", generation));
+        eprintln!();
     }
-    eprintln!();
     print_json(&keys)
 }
 
@@ -237,6 +244,7 @@ fn list(file: &PathBuf) -> Result<(), String> {
     let keys = read_tang_keys(file)?;
     println!("{}", describe_generation("current", &keys.current));
     for generation in &keys.retired {
+        println!();
         println!("{}", describe_generation("retired", generation));
     }
     Ok(())
@@ -392,6 +400,22 @@ mod tests {
     fn test_prune_keys_thumbprint_rejects_an_unknown_thumbprint() {
         let keys = TangKeys { current: test_generation(chrono::Utc::now()), retired: Vec::new() };
         assert!(prune_keys(keys, PruneSelector::Thumbprint("unknown".to_string())).is_err());
+    }
+
+    #[test]
+    fn test_prune_keys_thumbprint_also_matches_the_signing_key() {
+        let now = chrono::Utc::now();
+        let keep = test_generation(now - chrono::Duration::hours(1));
+        let drop = test_generation(now - chrono::Duration::hours(2));
+        let drop_sig_thumbprint = drop.sig.thumbprint();
+        let keys = TangKeys { current: test_generation(now), retired: vec![keep, drop] };
+
+        let (pruned_keys, removed) =
+            prune_keys(keys, PruneSelector::Thumbprint(drop_sig_thumbprint.clone())).expect("prune must succeed");
+
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].sig.thumbprint(), drop_sig_thumbprint, "the removed generation must be reported");
+        assert_eq!(pruned_keys.retired.len(), 1);
     }
 
     #[test]

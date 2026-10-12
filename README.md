@@ -144,17 +144,27 @@ cargo run --bin keygen -- prune tang-keys.json > pruned-keys.json
 Defaults to removing the single oldest retired generation; `--keep <N>`
 (keep only the N newest retired generations, removing the rest),
 `--older-than <DURATION>` (e.g. `1y`, `6months`), or `--thumbprint
-<THUMBPRINT>` select differently. To see each generation's thumbprint, the
-only identifier `--thumbprint` takes, along with its creation time and note:
+<THUMBPRINT>` (either of a generation's two thumbprints below) select
+differently. To see each generation's thumbprints, creation time, and note:
 
 ```sh
 cargo run --bin keygen -- list tang-keys.json
 ```
 
 ```
-current: thumbprint E17UI1rXDxhAAZoWLo1d8_EZBy6-JUHvLvPeRV1EW9U, created 2026-10-09 15:29:07 UTC (annual rotation)
-retired: thumbprint Im_OiAfxu6vI9dOW7kM9d6YBPgag2VdLiYLDZlB5L64, created 2026-10-09 15:29:07 UTC (initial rollout)
+current: created 2026-10-12 08:42:16 UTC (annual rotation)
+  signing thumbprint:  oV6Cym3PZJ10CwEydYmcUdDSyPBvCrYsj4QOZ7-qqZA
+  exchange thumbprint: yWJ8o7LoJrBrueO7lkz31E0-c-ccJSK2u3eVSOJBRpo
+
+retired: created 2026-10-12 08:42:16 UTC (initial rollout)
+  signing thumbprint:  IUvGdGzAmkW1422otDSVVoi7-UavLZ2WU1TETDIYFCc
+  exchange thumbprint: ZDB_prwDEiixyOXNvfd7pXlyh3X4pdrrPvHmmtxndGU
 ```
+
+The signing thumbprint is what a Clevis client's trust-on-first-use prompt
+and `thp` pin show; check it against this output before trusting a server.
+The exchange thumbprint is the `kid` that actually appears in `/rec/<kid>`
+URLs and server logs.
 
 ### 4. Create the allowlist's KV namespace
 
