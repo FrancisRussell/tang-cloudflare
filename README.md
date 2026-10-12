@@ -109,12 +109,17 @@ anything else:
 
 1. Copy `tang-keys.json` into a password manager or other durable, offline
    backup.
-2. Upload it to Cloudflare: `npm run upload-key`. This first validates the
-   file with `check-key`, which checks each key's cryptographic validity
-   more thoroughly than the Worker does on a live request, catching a
-   corrupt or malformed key before it ever reaches Cloudflare. Takes a path
-   e.g. `npm run upload-key -- rotated-keys.json`, if the file isn't under
-   `tang-keys.json`.
+2. Upload it to Cloudflare:
+
+   ```sh
+   npm run upload-key
+   ```
+
+   This first validates the file with `check-key`, which checks each key's
+   cryptographic validity more thoroughly than the Worker does on a live
+   request, catching a corrupt or malformed key before it ever reaches
+   Cloudflare. Takes a path too, e.g. `npm run upload-key -- rotated-keys.json`,
+   if the file isn't under `tang-keys.json`.
 3. Delete the local file.
 
 To rotate the keys later:
