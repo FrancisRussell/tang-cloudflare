@@ -8,7 +8,7 @@
     "deploy": "wrangler deploy",
     "upload-key": "bash scripts/upload-key.sh",
     "set-allowlist": "bash scripts/set-allowlist.sh",
-    "get-allowlist": "wrangler kv key get --binding=ALLOWED_CIDRS_KV --remote cidrs"
+    "get-allowlist": "wrangler kv key get --binding=ALLOWED_CIDRS_KV --remote cidrs --text"
   },
   "devDependencies": {
     "wrangler": "^4.149.0"
