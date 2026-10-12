@@ -3,6 +3,8 @@
 /node_modules
 .wrangler
 .dev.vars
+# keygen's default output name; holds the live Tang keys themselves.
+/tang-keys.json
 tags
 tags.lock
 tags.temp
