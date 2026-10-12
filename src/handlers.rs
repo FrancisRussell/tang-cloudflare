@@ -20,6 +20,9 @@ mod content_types {
 /// apart silently.
 pub(crate) const KID_PARAM: &str = "kid";
 
+/// Same as `KID_PARAM`, for `/adv/:thp`'s optional requested signing key.
+pub(crate) const THP_PARAM: &str = "thp";
+
 /// Real `/rec` bodies are JWK EC points a few hundred bytes long; anything
 /// past this is already implausible rather than a request this project
 /// needs to accept. Also closes a gap `looks_like_ec_point` alone doesn't:
@@ -41,7 +44,11 @@ fn content_type_headers(value: &str) -> Headers {
     headers
 }
 
-/// Handles `GET /adv`.
+/// Handles `GET /adv`, `/adv/`, and `/adv/:thp`. See "`/adv/<thp>` and key
+/// rotation" in the README: a requested `thp` can make an extra, retired
+/// signing key co-sign the response, but the advertised exchange key is
+/// always the current generation's. A `thp` matching no known signing key
+/// at all is a 404.
 pub(crate) async fn handle_adv(req: Request, ctx: RouteContext<()>) -> Result<Response> {
     if !authorized(&req, &ctx.env).await {
         return error_response(StatusCode::FORBIDDEN);
@@ -50,7 +57,9 @@ pub(crate) async fn handle_adv(req: Request, ctx: RouteContext<()>) -> Result<Re
         Ok(k) => k,
         Err(status) => return error_response(status),
     };
-    let Ok(adv) = keys.build_adv_tangy() else { return error_response(StatusCode::INTERNAL_SERVER_ERROR) };
+    let thp = ctx.param(THP_PARAM).map(String::as_str);
+    let Some(co_signer) = keys.find_adv_co_signer(thp) else { return error_response(StatusCode::NOT_FOUND) };
+    let Ok(adv) = keys.build_adv_tangy(co_signer) else { return error_response(StatusCode::INTERNAL_SERVER_ERROR) };
     match adv.adv(None) {
         Ok(body) => Ok(Response::ok(body)?.with_headers(content_type_headers(content_types::JOSE_JSON))),
         Err(_) => error_response(StatusCode::INTERNAL_SERVER_ERROR),

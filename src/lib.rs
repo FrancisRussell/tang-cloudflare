@@ -22,16 +22,23 @@ mod keys;
 pub use access_control::AllowList;
 pub use keys::{KeyGeneration, TangKeys, EXCHANGE_KEY_ALG, SIGNING_KEY_ALG};
 
-/// The Worker's HTTP entry point, routing to `/adv` and `/rec/:kid`. `/adv`
-/// is registered both bare and with a trailing slash, since a plain
-/// `clevis encrypt tang` with no `thp` configured requests the latter.
+/// The Worker's HTTP entry point, routing to `/adv` and `/rec/:kid`.
+/// `/adv` is registered three ways: bare, with a trailing slash (what a
+/// plain `clevis encrypt tang` with no `thp` configured requests, the
+/// common case for a first-time binding), and with a trailing
+/// thumbprint (what a client with a `thp` already configured requests,
+/// e.g. to skip the trust prompt, or a client surviving a key rotation —
+/// see "`/adv/<thp>` and key rotation" in the README). All three share
+/// `handle_adv`.
 #[event(fetch)]
 pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     console_error_panic_hook::set_once();
     let rec_pattern = format!("/rec/:{}", handlers::KID_PARAM);
+    let adv_thp_pattern = format!("/adv/:{}", handlers::THP_PARAM);
     Router::new()
         .get_async("/adv", handlers::handle_adv)
         .get_async("/adv/", handlers::handle_adv)
+        .get_async(&adv_thp_pattern, handlers::handle_adv)
         .post_async(&rec_pattern, handlers::handle_rec)
         .run(req, env)
         .await

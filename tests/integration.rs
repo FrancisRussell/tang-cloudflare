@@ -166,14 +166,34 @@ fn write_dev_vars(dir: &Path, tang_keys_json: &str) {
         .expect("failed to write .dev.vars");
 }
 
-/// Runs the real `keygen generate`, already built by Cargo as a
-/// prerequisite of this test binary, and returns its stdout: a `TANG_KEYS`
-/// JSON with one current generation and no retired ones.
-fn generate_test_tang_keys() -> String {
-    let output =
-        Command::new(env!("CARGO_BIN_EXE_keygen")).arg("generate").output().expect("failed to run keygen generate");
-    assert!(output.status.success(), "keygen generate failed: {}", String::from_utf8_lossy(&output.stderr));
+/// Runs the real `keygen` binary, already built by Cargo as a prerequisite
+/// of this test binary, and returns its stdout.
+fn run_keygen(args: &[&str]) -> String {
+    let output = Command::new(env!("CARGO_BIN_EXE_keygen")).args(args).output().expect("failed to run keygen");
+    assert!(output.status.success(), "keygen failed: {}", String::from_utf8_lossy(&output.stderr));
     String::from_utf8(output.stdout).expect("keygen's output must be valid UTF-8")
+}
+
+/// Runs `keygen generate` then `keygen rotate`, giving a `TANG_KEYS` JSON
+/// with one current and one retired generation, needed to exercise
+/// `/adv/<thp>`'s co-signing against a retired signing key. Returns that
+/// JSON along with the retired generation's signing thumbprint.
+fn generate_test_tang_keys() -> (String, String) {
+    let generated = run_keygen(&["generate"]);
+
+    let scratch_dir = std::env::temp_dir().join(format!("tang-cloudflare-test-keygen-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch_dir).expect("failed to create the keygen scratch directory");
+    let generated_path = scratch_dir.join("generated.json");
+    std::fs::write(&generated_path, &generated).expect("failed to write the generated keys");
+    let rotated = run_keygen(&["rotate", generated_path.to_str().expect("temp dir path must be valid UTF-8")]);
+    std::fs::remove_dir_all(&scratch_dir).expect("failed to remove the keygen scratch directory");
+
+    let rotated_json: serde_json::Value = serde_json::from_str(&rotated).expect("rotate's output must be valid JSON");
+    let retired_sig: AdvKey = serde_json::from_value(rotated_json["retired"][0]["sig"].clone())
+        .expect("rotate's output must have a retired generation with a sig key");
+    let retired_sig_thp = jwk_thumbprint(&retired_sig);
+
+    (rotated, retired_sig_thp)
 }
 
 /// Manages a `wrangler dev` child process covering the whole test run:
@@ -401,19 +421,30 @@ fn jwk_thumbprint(key: &AdvKey) -> String {
     base64ct::Base64UrlUnpadded::encode_string(&Sha256::digest(json.as_bytes()))
 }
 
-/// The exchange (`alg: "ECMR"`) key advertised in an `/adv` response body,
-/// and the `kid` a client derives for it.
-fn exchange_key(adv_body: &str) -> (String, AdvKey) {
+/// Parses an `/adv` response body and returns the payload's key matching
+/// `alg`, along with the `kid` a client derives for it.
+fn find_adv_key(adv_body: &str, alg: &str) -> (String, AdvKey) {
     let adv: Adv = serde_json::from_str(adv_body).expect("adv body must be valid JSON");
     // tangy-lib encodes the payload with the padded url-safe alphabet; see
     // its own `adv_internal`.
     let payload_json = base64ct::Base64Url::decode_vec(&adv.payload).expect("adv payload must be valid base64url");
     let payload: Payload = serde_json::from_slice(&payload_json).expect("adv payload must be valid JSON");
-    let key =
-        payload.keys.into_iter().find(|k| k.alg.as_deref() == Some("ECMR")).expect("adv must include an exchange key");
+    let key = payload
+        .keys
+        .into_iter()
+        .find(|k| k.alg.as_deref() == Some(alg))
+        .unwrap_or_else(|| panic!("adv must include a key with alg {alg:?}"));
     let kid = jwk_thumbprint(&key);
     (kid, key)
 }
+
+/// The exchange (`alg: "ECMR"`) key advertised in an `/adv` response body,
+/// and the `kid` a client derives for it.
+fn exchange_key(adv_body: &str) -> (String, AdvKey) { find_adv_key(adv_body, "ECMR") }
+
+/// The signing (`alg: "ES512"`) key advertised in an `/adv` response body,
+/// and the `kid` a client derives for it.
+fn signing_key(adv_body: &str) -> (String, AdvKey) { find_adv_key(adv_body, "ES512") }
 
 /// A P-521 point from JWK coordinates, SEC1-uncompressed-encoded by hand
 /// (`0x04 || x || y`) rather than going through `elliptic_curve::JwkEcKey`,
@@ -484,6 +515,26 @@ fn scenario_adv_trailing_slash_returns_a_valid_advertisement(dev: &WranglerDev) 
     let result = get_path(dev, "/adv/", Some(ALLOWED_IP));
     assert_eq!(result.status, StatusCode::OK, "body: {}", result.body);
     assert_eq!(result.content_type.as_deref(), Some(JOSE_JSON));
+}
+
+/// Asserts `GET /adv/<thp>` succeeds, both for the current signing key's
+/// own thumbprint and for a retired generation's, mirroring a client with
+/// a `thp` already pinned from before a rotation.
+fn scenario_adv_thp_matches_current_and_retired_signing_keys(
+    dev: &WranglerDev, current_sig_thp: &str, retired_sig_thp: &str,
+) {
+    for thp in [current_sig_thp, retired_sig_thp] {
+        let result = get_path(dev, &format!("/adv/{thp}"), Some(ALLOWED_IP));
+        assert_eq!(result.status, StatusCode::OK, "thp {thp}, body: {}", result.body);
+        assert_eq!(result.content_type.as_deref(), Some(JOSE_JSON));
+    }
+}
+
+/// Asserts `GET /adv/<thp>` for a thumbprint matching no known signing key,
+/// current or retired, is rejected as not found rather than crashing.
+fn scenario_adv_thp_unknown_is_not_found(dev: &WranglerDev) {
+    let result = get_path(dev, "/adv/not-a-real-thumbprint", Some(ALLOWED_IP));
+    assert_eq!(result.status, StatusCode::NOT_FOUND, "body: {}", result.body);
 }
 
 /// Asserts `/adv` is forbidden for an IP outside the allowlist.
@@ -564,13 +615,18 @@ fn scenario_rec_oversized_body_is_rejected_without_crashing(dev: &WranglerDev, e
 fn integration_test() {
     install_sigint_cleanup();
 
-    let tang_keys = generate_test_tang_keys();
+    let (tang_keys, retired_sig_thp) = generate_test_tang_keys();
     let dev = WranglerDev::start(&tang_keys);
 
     scenario_adv_disallowed_ip_is_forbidden(&dev);
     scenario_adv_missing_ip_is_forbidden(&dev);
     let (exc_kid, exc_key) = scenario_adv_allowed_ip_returns_a_valid_advertisement(&dev);
     scenario_adv_trailing_slash_returns_a_valid_advertisement(&dev);
+
+    let adv_result = get_adv(&dev, Some(ALLOWED_IP));
+    let (current_sig_thp, _) = signing_key(&adv_result.body);
+    scenario_adv_thp_matches_current_and_retired_signing_keys(&dev, &current_sig_thp, &retired_sig_thp);
+    scenario_adv_thp_unknown_is_not_found(&dev);
 
     scenario_rec_disallowed_ip_is_forbidden(&dev, &exc_kid);
     scenario_rec_unknown_kid_is_not_found(&dev);

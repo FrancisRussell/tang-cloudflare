@@ -69,10 +69,14 @@ impl KeyGeneration {
     /// Serializes `self`'s two keys back to the raw JWK JSON strings
     /// `TangyLib::init` takes.
     fn to_jwk_strings(&self) -> Result<[String; 2], String> {
-        Ok([
-            serde_json::to_string(&self.sig).map_err(|e| format!("signing key: {e}"))?,
-            serde_json::to_string(&self.exc).map_err(|e| format!("exchange key: {e}"))?,
-        ])
+        Ok([self.sig_jwk_string()?, serde_json::to_string(&self.exc).map_err(|e| format!("exchange key: {e}"))?])
+    }
+
+    /// Serializes just `self`'s signing key, for `build_adv_tangy`'s
+    /// retired-generation co-signing case: it needs this generation's
+    /// signing key loaded, but never its exchange key.
+    fn sig_jwk_string(&self) -> Result<String, String> {
+        serde_json::to_string(&self.sig).map_err(|e| format!("signing key: {e}"))
     }
 
     /// Builds the `TangyLib` that serves `/rec` for this one generation:
@@ -81,7 +85,16 @@ impl KeyGeneration {
     /// request's `kid` actually matched (see `TangKeys::find_generation`),
     /// keeping that cost constant regardless of how many retired
     /// generations exist.
-    pub(crate) fn build_rec_tangy(&self) -> Result<TangyLib, String> { build_rec_tangy_from(std::iter::once(self)) }
+    pub(crate) fn build_rec_tangy(&self) -> Result<TangyLib, String> { build_tangy_from(std::iter::once(self)) }
+}
+
+/// The extra, retired generation (if any) whose signing key should
+/// co-sign an `/adv`/`/adv/<thp>` response alongside the current
+/// generation's own; see `TangKeys::find_adv_co_signer`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum CoSigner<'a> {
+    None,
+    Retired(&'a KeyGeneration),
 }
 
 /// The `TANG_KEYS` secret's JSON shape: exactly one advertised generation
@@ -142,23 +155,42 @@ impl TangKeys {
         Ok(())
     }
 
-    /// Builds the `TangyLib` that serves `/adv`: only the current
-    /// generation, so retired generations are never advertised. A
-    /// separate `TangyLib` from `build_rec_tangy_all`'s, rather than one
-    /// shared instance with a visibility flag, since tangy-lib itself has
-    /// no advertised-vs-hidden concept: every key it's given is advertised
-    /// unconditionally.
-    pub(crate) fn build_adv_tangy(&self) -> Result<TangyLib, String> {
-        build_rec_tangy_from(std::iter::once(&self.current))
+    /// Resolves `thp` to the extra, retired signing key (if any) that
+    /// should co-sign an `/adv`/`/adv/<thp>` response alongside the
+    /// current generation's own (see `build_adv_tangy`).
+    ///
+    /// Returns `None` if `thp` is given but matches no known signing
+    /// key at all, current or retired: the caller's cue to 404, a
+    /// normal client-supplied mismatch rather than a fault on this end.
+    pub(crate) fn find_adv_co_signer(&self, thp: Option<&str>) -> Option<CoSigner<'_>> {
+        let Some(thp) = thp else { return Some(CoSigner::None) };
+        if thp == self.current.sig.thumbprint() {
+            return Some(CoSigner::None);
+        }
+        self.retired.iter().find(|generation| generation.sig.thumbprint() == thp).map(CoSigner::Retired)
     }
 
-    /// Builds the `TangyLib` that serves `/rec` from every generation at
-    /// once, current and retired. Used by `validate`, to check them all
-    /// against one shared instance; the live Worker instead builds one
-    /// generation at a time (see `KeyGeneration::build_rec_tangy`), since
-    /// a request's `kid` only ever needs the single generation it
-    /// matched.
-    fn build_rec_tangy_all(&self) -> Result<TangyLib, String> { build_rec_tangy_from(self.generations()) }
+    /// Builds the `TangyLib` serving `/adv` and `/adv/<thp>`, for a
+    /// `co_signer` resolved by `find_adv_co_signer`. Always loads the
+    /// current generation's signing and exchange key; `CoSigner::Retired`
+    /// adds that generation's signing key alone, never its exchange key,
+    /// so the advertised exchange key is always the current generation's
+    /// (see "`/adv/<thp>` and key rotation" in the README).
+    /// `TangyLib::init`'s precomputed advertisement signs with every
+    /// signing key loaded, so this lets a client that already trusts
+    /// the co-signer's key verify the response too.
+    pub(crate) fn build_adv_tangy(&self, co_signer: CoSigner<'_>) -> Result<TangyLib, String> {
+        let mut jwks = Vec::from(self.current.to_jwk_strings()?);
+        if let CoSigner::Retired(retired) = co_signer {
+            jwks.push(retired.sig_jwk_string()?);
+        }
+        build_tangy_from_jwks(&jwks)
+    }
+
+    /// Builds a `TangyLib` from every generation at once, current and
+    /// retired. Used by `validate` to check them all against one shared
+    /// instance; not used to serve `/adv` (see `build_adv_tangy`).
+    fn build_all_generations_tangy(&self) -> Result<TangyLib, String> { build_tangy_from(self.generations()) }
 
     /// Validates a `TANG_KEYS` JSON more thoroughly than parsing it alone.
     /// Checks `retired`'s order (see `check_retired_order`), every key's
@@ -180,7 +212,7 @@ impl TangKeys {
             check_key_point_matches_scalar(&generation.exc)
                 .map_err(|e| format!("exchange key rejected (created {}): {e}", generation.created_at))?;
         }
-        let rec = self.build_rec_tangy_all()?;
+        let rec = self.build_all_generations_tangy()?;
         let dummy_request = generator_point_json();
         for generation in self.generations() {
             rec.rec(&generation.exc.thumbprint(), &dummy_request)
@@ -201,19 +233,30 @@ impl TangKeys {
     }
 }
 
-/// Builds the `TangyLib` serving `/rec` for exactly `generations`. Shared
-/// by `KeyGeneration::build_rec_tangy` (one generation, for the live
-/// Worker) and `TangKeys::build_rec_tangy_all` (every generation, for
-/// `validate`), so each handler only pays for the one it needs: building
-/// either one performs a real signature per signing key, via
-/// `TangyLib::init`'s own precomputed advertisement.
-fn build_rec_tangy_from<'a>(generations: impl Iterator<Item = &'a KeyGeneration>) -> Result<TangyLib, String> {
-    let mut rec_keys = Vec::new();
+/// Builds a `TangyLib` from whole generations at once: every key of
+/// each, in pairs. Shared by `KeyGeneration::build_rec_tangy` (one
+/// generation, for the live Worker's `/rec`) and
+/// `TangKeys::build_all_generations_tangy` (every generation, for
+/// `validate`). `TangKeys::build_adv_tangy` builds its own JWK list
+/// directly instead, since it sometimes needs a generation's signing key
+/// without its paired exchange key.
+fn build_tangy_from<'a>(generations: impl Iterator<Item = &'a KeyGeneration>) -> Result<TangyLib, String> {
+    let mut jwks = Vec::new();
     for generation in generations {
-        rec_keys.extend(generation.to_jwk_strings()?);
+        jwks.extend(generation.to_jwk_strings()?);
     }
-    let rec_refs: Vec<&str> = rec_keys.iter().map(String::as_str).collect();
-    TangyLib::init(KeySource::Vector(&rec_refs)).map_err(|e| e.to_string())
+    build_tangy_from_jwks(&jwks)
+}
+
+/// Builds a `TangyLib` from raw JWK JSON strings, exactly as
+/// `TangyLib::init` takes them: every key given is both advertised and
+/// usable for its role (signing or key exchange) unconditionally, so
+/// which keys end up in `jwks` is entirely the caller's decision.
+/// Building a `TangyLib` performs a real signature per signing key
+/// given, via `TangyLib::init`'s own precomputed advertisement.
+fn build_tangy_from_jwks(jwks: &[String]) -> Result<TangyLib, String> {
+    let jwk_refs: Vec<&str> = jwks.iter().map(String::as_str).collect();
+    TangyLib::init(KeySource::Vector(&jwk_refs)).map_err(|e| e.to_string())
 }
 
 /// Decodes `x`/`y` as base64url and checks the resulting point is
@@ -440,19 +483,86 @@ mod tests {
         assert!(parse_and_validate(&keys.to_string()).is_ok());
     }
 
+    /// Decodes an `adv()` response body into its payload's advertised
+    /// keys and how many signatures are attached, so these tests can
+    /// assert on both without repeating the JOSE-unwrapping each time.
+    fn decode_adv(adv_body: &str) -> (Vec<MyJwkEcKey>, usize) {
+        #[derive(serde::Deserialize)]
+        struct Payload {
+            keys: Vec<MyJwkEcKey>,
+        }
+        let adv_body: serde_json::Value = serde_json::from_str(adv_body).expect("adv body must be JSON");
+        let payload = base64ct::Base64Url::decode_vec(adv_body["payload"].as_str().expect("adv body has a payload"))
+            .expect("adv payload must be valid base64url");
+        let payload: Payload = serde_json::from_slice(&payload).expect("adv payload must be JSON");
+        let signature_count = match adv_body["signatures"].as_array() {
+            Some(signatures) => signatures.len(),
+            // A single signer serializes to one top-level `signature`
+            // field instead of a `signatures` array; see tangy-lib's own
+            // `adv_internal`.
+            None => 1,
+        };
+        (payload.keys, signature_count)
+    }
+
+    /// Resolves `thp` and builds the resulting `TangyLib`, as
+    /// `handlers::handle_adv` does, panicking instead of 404ing/500ing
+    /// on a mismatch or build failure.
+    fn build_adv_tangy_for_test(keys: &TangKeys, thp: Option<&str>) -> TangyLib {
+        let co_signer = keys.find_adv_co_signer(thp).expect("thp must match a known signing key");
+        keys.build_adv_tangy(co_signer).expect("a valid key set must build")
+    }
+
     #[test]
-    fn test_build_tangy_advertises_only_the_current_generation() {
+    fn test_build_adv_tangy_with_no_thp_advertises_only_the_current_generation() {
         let mut keys_json = valid_tang_keys_json();
         keys_json["retired"] = serde_json::json!([valid_key_generation_json()]);
         let keys: TangKeys = keys_json.to_string().parse().expect("a valid TangKeys");
-        let adv = keys.build_adv_tangy().expect("a valid key set must build");
-        let adv_body: serde_json::Value =
-            serde_json::from_str(&adv.adv(None).expect("adv must succeed")).expect("adv body must be JSON");
-        let payload = base64ct::Base64Url::decode_vec(adv_body["payload"].as_str().expect("adv body has a payload"))
-            .expect("adv payload must be valid base64url");
-        let payload: serde_json::Value = serde_json::from_slice(&payload).expect("adv payload must be JSON");
-        let advertised_keys = payload["keys"].as_array().expect("adv payload has a keys array");
+        let adv = build_adv_tangy_for_test(&keys, None);
+        let (advertised_keys, signature_count) = decode_adv(&adv.adv(None).expect("adv must succeed"));
         assert_eq!(advertised_keys.len(), 2, "only the current generation's 2 keys should be advertised");
+        assert_eq!(signature_count, 1, "only the current generation should sign");
+    }
+
+    #[test]
+    fn test_build_adv_tangy_with_the_current_signing_thumbprint_is_the_same_as_no_thp() {
+        let keys: TangKeys = valid_tang_keys_json().to_string().parse().expect("a valid TangKeys");
+        let current_sig_thp = keys.current.sig.thumbprint();
+        let adv = build_adv_tangy_for_test(&keys, Some(&current_sig_thp));
+        let (advertised_keys, signature_count) = decode_adv(&adv.adv(None).expect("adv must succeed"));
+        assert_eq!(advertised_keys.len(), 2, "only the current generation's 2 keys should be advertised");
+        assert_eq!(signature_count, 1, "the current signing key is already loaded; it shouldn't sign twice");
+    }
+
+    /// The core rotation-safety property `/adv/<thp>` relies on: a `thp`
+    /// naming a retired generation's signing key makes that key co-sign
+    /// the response (so a client that already trusts it can verify this
+    /// one too), but never adds that generation's exchange key to the
+    /// payload. Advertising a second exchange key would leave a client
+    /// creating a fresh binding with no way to tell which one is
+    /// current.
+    #[test]
+    fn test_build_adv_tangy_with_a_retired_thp_co_signs_but_only_advertises_the_current_exchange_key() {
+        let mut keys_json = valid_tang_keys_json();
+        keys_json["retired"] = serde_json::json!([valid_key_generation_json()]);
+        let keys: TangKeys = keys_json.to_string().parse().expect("a valid TangKeys");
+        let retired_sig_thp = keys.retired[0].sig.thumbprint();
+        let current_exc_thp = keys.current.exc.thumbprint();
+
+        let adv = build_adv_tangy_for_test(&keys, Some(&retired_sig_thp));
+        let (advertised_keys, signature_count) = decode_adv(&adv.adv(None).expect("adv must succeed"));
+
+        assert_eq!(signature_count, 2, "both the current and the matched retired key should sign");
+        let exchange_keys: Vec<_> =
+            advertised_keys.iter().filter(|k| k.alg.as_deref() == Some(EXCHANGE_KEY_ALG)).collect();
+        assert_eq!(exchange_keys.len(), 1, "only one exchange key should ever be advertised");
+        assert_eq!(exchange_keys[0].thumbprint(), current_exc_thp, "the one advertised exchange key must be current's");
+    }
+
+    #[test]
+    fn test_build_adv_tangy_with_an_unknown_thp_matches_nothing() {
+        let keys: TangKeys = valid_tang_keys_json().to_string().parse().expect("a valid TangKeys");
+        assert!(keys.find_adv_co_signer(Some("not-a-real-thumbprint")).is_none());
     }
 
     #[test]
@@ -479,7 +589,7 @@ mod tests {
         };
         keys_json["retired"] = serde_json::json!([retired]);
         let keys: TangKeys = keys_json.to_string().parse().expect("a valid TangKeys");
-        let rec = keys.build_rec_tangy_all().expect("a valid key set must build");
+        let rec = keys.build_all_generations_tangy().expect("a valid key set must build");
         let dummy_request = generator_point_json();
         assert!(rec.rec(&retired_thumbprint, &dummy_request).is_ok());
     }
