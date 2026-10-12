@@ -166,12 +166,13 @@ fn write_dev_vars(dir: &Path, tang_keys_json: &str) {
         .expect("failed to write .dev.vars");
 }
 
-/// Runs the real `keygen generate` command, already built by Cargo as a
-/// prerequisite of this test binary, and returns its stdout: the JSON the
-/// `TANG_KEYS` secret expects.
+/// Runs the real `keygen generate`, already built by Cargo as a
+/// prerequisite of this test binary, and returns its stdout: a `TANG_KEYS`
+/// JSON with one current generation and no retired ones.
 fn generate_test_tang_keys() -> String {
-    let output = Command::new(env!("CARGO_BIN_EXE_keygen")).arg("generate").output().expect("failed to run keygen");
-    assert!(output.status.success(), "keygen failed: {}", String::from_utf8_lossy(&output.stderr));
+    let output =
+        Command::new(env!("CARGO_BIN_EXE_keygen")).arg("generate").output().expect("failed to run keygen generate");
+    assert!(output.status.success(), "keygen generate failed: {}", String::from_utf8_lossy(&output.stderr));
     String::from_utf8(output.stdout).expect("keygen's output must be valid UTF-8")
 }
 
@@ -348,14 +349,18 @@ fn to_result(outcome: Result<http::Response<ureq::Body>, ureq::Error>) -> HttpRe
     HttpResult { status, content_type, body }
 }
 
-/// Sends a `GET /adv` request, optionally with a `CF-Connecting-IP` header.
-fn get_adv(dev: &WranglerDev, client_ip: Option<&str>) -> HttpResult {
-    let mut req = with_test_config(ureq::get(&format!("{}/adv", dev.base_url())));
+/// Sends a `GET` request to `path` (e.g. `/adv`, `/adv/`, `/adv/<thp>`),
+/// optionally with a `CF-Connecting-IP` header.
+fn get_path(dev: &WranglerDev, path: &str, client_ip: Option<&str>) -> HttpResult {
+    let mut req = with_test_config(ureq::get(&format!("{}{path}", dev.base_url())));
     if let Some(ip) = client_ip {
         req = req.header(CF_CONNECTING_IP, ip);
     }
     to_result(req.call())
 }
+
+/// Sends a `GET /adv` request, optionally with a `CF-Connecting-IP` header.
+fn get_adv(dev: &WranglerDev, client_ip: Option<&str>) -> HttpResult { get_path(dev, "/adv", client_ip) }
 
 /// Sends a `POST /rec/<kid>` request with `body`, optionally with a
 /// `CF-Connecting-IP` header.
@@ -396,19 +401,16 @@ fn jwk_thumbprint(key: &AdvKey) -> String {
     base64ct::Base64UrlUnpadded::encode_string(&Sha256::digest(json.as_bytes()))
 }
 
-/// Parses an `/adv` response body and returns the exchange (`alg: "ECMR"`)
-/// key along with the `kid` a client derives for it.
+/// The exchange (`alg: "ECMR"`) key advertised in an `/adv` response body,
+/// and the `kid` a client derives for it.
 fn exchange_key(adv_body: &str) -> (String, AdvKey) {
     let adv: Adv = serde_json::from_str(adv_body).expect("adv body must be valid JSON");
     // tangy-lib encodes the payload with the padded url-safe alphabet; see
     // its own `adv_internal`.
     let payload_json = base64ct::Base64Url::decode_vec(&adv.payload).expect("adv payload must be valid base64url");
     let payload: Payload = serde_json::from_slice(&payload_json).expect("adv payload must be valid JSON");
-    let key = payload
-        .keys
-        .into_iter()
-        .find(|k| k.alg.as_deref() == Some("ECMR"))
-        .expect("adv must include an ECMR exchange key");
+    let key =
+        payload.keys.into_iter().find(|k| k.alg.as_deref() == Some("ECMR")).expect("adv must include an exchange key");
     let kid = jwk_thumbprint(&key);
     (kid, key)
 }
@@ -473,6 +475,15 @@ fn scenario_adv_allowed_ip_returns_a_valid_advertisement(dev: &WranglerDev) -> (
     assert_eq!(result.status, StatusCode::OK, "body: {}", result.body);
     assert_eq!(result.content_type.as_deref(), Some(JOSE_JSON));
     exchange_key(&result.body)
+}
+
+/// Asserts `GET /adv/` (trailing slash, no `thp`) succeeds like a bare
+/// `/adv`: the shape Clevis actually requests when no `thp` is configured
+/// yet, the common first-bind case.
+fn scenario_adv_trailing_slash_returns_a_valid_advertisement(dev: &WranglerDev) {
+    let result = get_path(dev, "/adv/", Some(ALLOWED_IP));
+    assert_eq!(result.status, StatusCode::OK, "body: {}", result.body);
+    assert_eq!(result.content_type.as_deref(), Some(JOSE_JSON));
 }
 
 /// Asserts `/adv` is forbidden for an IP outside the allowlist.
@@ -559,6 +570,7 @@ fn integration_test() {
     scenario_adv_disallowed_ip_is_forbidden(&dev);
     scenario_adv_missing_ip_is_forbidden(&dev);
     let (exc_kid, exc_key) = scenario_adv_allowed_ip_returns_a_valid_advertisement(&dev);
+    scenario_adv_trailing_slash_returns_a_valid_advertisement(&dev);
 
     scenario_rec_disallowed_ip_is_forbidden(&dev, &exc_kid);
     scenario_rec_unknown_kid_is_not_found(&dev);

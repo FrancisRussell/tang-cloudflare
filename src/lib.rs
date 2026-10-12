@@ -22,13 +22,16 @@ mod keys;
 pub use access_control::AllowList;
 pub use keys::{KeyGeneration, TangKeys, EXCHANGE_KEY_ALG, SIGNING_KEY_ALG};
 
-/// The Worker's HTTP entry point, routing to `/adv` and `/rec/:kid`.
+/// The Worker's HTTP entry point, routing to `/adv` and `/rec/:kid`. `/adv`
+/// is registered both bare and with a trailing slash, since a plain
+/// `clevis encrypt tang` with no `thp` configured requests the latter.
 #[event(fetch)]
 pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     console_error_panic_hook::set_once();
     let rec_pattern = format!("/rec/:{}", handlers::KID_PARAM);
     Router::new()
         .get_async("/adv", handlers::handle_adv)
+        .get_async("/adv/", handlers::handle_adv)
         .post_async(&rec_pattern, handlers::handle_rec)
         .run(req, env)
         .await
