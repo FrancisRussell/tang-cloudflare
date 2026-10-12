@@ -202,7 +202,31 @@ npm run deploy
 
 The URL of the worker will be printed during this step.
 
-### 7. Point any clients at Tang
+### 7. Verify it's working
+
+To do this `clevis` must be installed (`apt install clevis` on Debian/Ubuntu,
+`dnf install clevis` on Fedora). This will only work on a machine configured to
+have access to your Tang server.
+
+```sh
+echo -n "hello tang" | clevis encrypt tang '{"url":"https://tang.<your-subdomain>.workers.dev"}' > test.jwe
+```
+
+This fetches `/adv` and, the first time, asks you to confirm the advertised
+signing key's thumbprint before trusting it (trust-on-first-use). Check it
+against the signing thumbprint `cargo run --bin keygen -- list tang-keys.json`
+printed (see step 3) rather than accepting on sight; a mismatch means this
+isn't talking to the server you think it is.
+
+```sh
+clevis decrypt < test.jwe
+```
+
+This calls `/rec` to derive the key back and should print `hello tang`.
+`test.jwe` itself isn't sensitive (it can't be decrypted without a live
+exchange with this Tang server), so no need to keep or securely delete it.
+
+### 8. Point any clients at Tang
 
 On the machine being unlocked, `clevis` needs pointing at this Worker's
 `*.workers.dev` URL (or a custom domain) as its Tang server. That side of
