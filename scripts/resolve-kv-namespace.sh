@@ -20,6 +20,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 if [[ -n "${DEPLOY_VARS_FILE:-}" ]]; then
+  # shellcheck disable=SC1090 # genuinely caller-supplied; no fixed path to point shellcheck at.
   source "$DEPLOY_VARS_FILE"
 elif [[ -f "$REPO_ROOT/deploy.vars" ]]; then
   source "$REPO_ROOT/deploy.vars"
