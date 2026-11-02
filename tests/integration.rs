@@ -317,7 +317,7 @@ impl WranglerDev {
         loop {
             match with_test_config(ureq::get(&format!("{}/adv", self.base_url()))).call() {
                 Ok(_) => return,
-                Err(ureq::Error::Io(_)) if Instant::now() < deadline => {
+                Err(ureq::Error::Io(_) | ureq::Error::Timeout(_)) if Instant::now() < deadline => {
                     std::thread::sleep(POLL_INTERVAL);
                 }
                 Err(e) => panic!("wrangler dev did not become ready: {e}\noutput:\n{}", self.captured_output()),
