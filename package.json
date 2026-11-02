@@ -11,6 +11,6 @@
     "get-allowlist": "bash scripts/get-allowlist.sh"
   },
   "devDependencies": {
-    "wrangler": "^4.149.0"
+    "wrangler": "^4.156.0"
   }
 }
