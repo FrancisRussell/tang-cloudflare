@@ -25,7 +25,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use base64ct::Encoding;
-use elliptic_curve::sec1::ToEncodedPoint;
+use elliptic_curve::sec1::ToSec1Point;
+use elliptic_curve::Generate;
 use http::StatusCode;
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
@@ -477,8 +478,8 @@ fn scalar_mul(
 fn scenario_rec_matches_expected_ecdh_point(dev: &WranglerDev, exc_kid: &str, exc_key: &AdvKey) {
     let server_pub = public_key_from_coords(&exc_key.x, &exc_key.y);
 
-    let client_secret = p521::SecretKey::random(&mut elliptic_curve::rand_core::OsRng);
-    let client_pub = client_secret.public_key().to_encoded_point(false);
+    let client_secret = p521::SecretKey::generate();
+    let client_pub = client_secret.public_key().to_sec1_point(false);
     let client_x = base64ct::Base64UrlUnpadded::encode_string(client_pub.x().expect("uncompressed point has x"));
     let client_y = base64ct::Base64UrlUnpadded::encode_string(client_pub.y().expect("uncompressed point has y"));
     let body = format!(r#"{{"kty":"EC","crv":"P-521","x":"{client_x}","y":"{client_y}"}}"#);
@@ -559,8 +560,7 @@ fn scenario_rec_disallowed_ip_is_forbidden(dev: &WranglerDev, exc_kid: &str) {
 /// genuinely valid, on-curve point so this exercises kid lookup specifically,
 /// not body validation.
 fn scenario_rec_unknown_kid_is_not_found(dev: &WranglerDev) {
-    let client_pub =
-        p521::SecretKey::random(&mut elliptic_curve::rand_core::OsRng).public_key().to_encoded_point(false);
+    let client_pub = p521::SecretKey::generate().public_key().to_sec1_point(false);
     let x = base64ct::Base64UrlUnpadded::encode_string(client_pub.x().expect("uncompressed point has x"));
     let y = base64ct::Base64UrlUnpadded::encode_string(client_pub.y().expect("uncompressed point has y"));
     let body = format!(r#"{{"kty":"EC","crv":"P-521","x":"{x}","y":"{y}"}}"#);

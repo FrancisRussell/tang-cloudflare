@@ -247,49 +247,14 @@ Needs its own local `TANG_KEYS` secret (see Cloudflare's docs on
 npx wrangler kv key put --binding=ALLOWED_CIDRS_KV --local cidrs 203.0.113.4/32
 ```
 
-## Implementation notes
+## `/adv/<thp>` and key rotation
 
-### tangy-lib panics
-
-`tangy-lib` parses its input with bare `.unwrap()`s rather than returning
-errors for malformed input ([rustfoo/tangy-lib#8][tangy-lib-panics]), which
-panics the Worker and can corrupt isolate state shared with other requests
-rather than just failing the one request.
-
-For `/adv` and `/rec`, this is worked around: `decode_ec_point` rejects a
-request body that's the right shape but not an actual point on the curve
-before it ever reaches `tangy-lib`, so a client can't trigger this.
-
-For the `TANG_KEYS` secret itself, there's no equivalent check on the live
-request path: `TangKeys::validate` (the same validation, including the
-exchange key's public point matching its own private scalar) only runs in
-`check-key` at upload time, not again on every `/adv`/`/rec` call.
-
-A `TANG_KEYS` secret set without going through that script, or corrupted after
-being set, can still panic the Worker. Re-validating on every request would
-cost one real cryptographic operation per key generation, current and
-retired, so this relies on always setting `TANG_KEYS` via the upload script
-instead.
-
-### `/adv/<thp>` and key rotation
-
-`/adv/<thp>` lets a client pinned to an old, now-retired signing key's
-thumbprint still get a response co-signed by it, alongside the current
-signing key. `tangy-lib` has no distinction between "advertised" and
-"signable" keys: loading a key to sign with also advertises it
-unconditionally, so naively loading a retired generation's signing key
-would advertise its exchange key too, and a client making a fresh
-binding could end up picking that one over the current one.
-
-`TangKeys::build_adv_tangy` works around this by loading a retired
-generation's signing key on its own, never paired with its exchange key.
-This relies on undocumented `tangy-lib` behaviour: `TangyLib::init` only
-checks that at least one signing and one exchange key are present
-somewhere in the whole set, not that every signing key has its own
-paired exchange key. Nothing states that's intentional, so a future
-`tangy-lib` release enforcing pairing would break this.
-
-[tangy-lib-panics]: https://github.com/rustfoo/tangy-lib/issues/8
+`/adv/<thp>` lets a client still pinned to an old, now-retired signing
+key's thumbprint get a response co-signed by it, alongside the current
+signing key, so it can verify the response without yet trusting the new
+one. The advertised payload is always just the current generation's
+signing and exchange key, regardless of which `thp` was requested; a
+`thp` matching no known signing key is a 404.
 
 ## License
 

@@ -12,26 +12,31 @@ readme = "README.md"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-base64ct = { version = "1", default-features = false, features = ["alloc"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 clap = { version = "4", default-features = false, features = ["derive", "help", "std", "usage", "wrap_help", "suggestions"], optional = true }
 console_error_panic_hook = "0.1"
-elliptic-curve = { version = "0.13", default-features = false, features = ["arithmetic", "sec1"] }
 futures-util = { version = "0.3", default-features = false }
-getrandom = { version = "0.2", default-features = false, features = ["js"] }
 http = { version = "1", default-features = false, features = ["std"] }
 humantime = { version = "2", optional = true }
 ipnetwork = { version = "0.21", default-features = false }
-p521 = { version = "0.13", default-features = false, features = ["arithmetic", "getrandom"] }
 serde = { version = "1", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1", default-features = false, features = ["std"] }
-tangy-lib = "0.1"
+tangy-lib = "1"
 worker = { version = "0.8", default-features = false }
 
+# tangy-lib's own getrandom dependency requests no wasm backend; this
+# supplies one via feature unification, scoped away from WASI (which
+# has its own, not a JS host).
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.4", default-features = false, features = ["wasm_js"] }
+
 [dev-dependencies]
+base64ct = { version = "1", default-features = false, features = ["alloc"] }
 ctrlc = "3.5.2"
+elliptic-curve = { version = "0.14", default-features = false, features = ["arithmetic"] }
 nix = { version = "0.31.3", default-features = false, features = ["signal"] }
-sha2 = { version = "0.10", default-features = false, features = ["std"] }
+p521 = { version = "0.14", default-features = false, features = ["arithmetic", "getrandom"] }
+sha2 = { version = "0.11", default-features = false }
 ureq = { version = "3", default-features = false }
 
 [features]

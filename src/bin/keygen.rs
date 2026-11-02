@@ -73,7 +73,7 @@ enum Command {
 /// `create_new_key_set`'s return order.
 fn generate_key_generation(note: Option<&str>) -> Result<KeyGeneration, String> {
     let (mut sig, mut exc) = (None, None);
-    for key in tangy_lib::create_new_key_set() {
+    for key in tangy_lib::create_new_key_set().map_err(|e| format!("tangy-lib key generation failed: {e}"))? {
         let parsed: MyJwkEcKey =
             serde_json::from_str(&key).map_err(|e| format!("tangy-lib produced an unparseable key: {e}"))?;
         match parsed.alg.as_deref() {
@@ -105,17 +105,17 @@ fn note_suffix(note: Option<&str>) -> String { note.map_or_else(String::new, |no
 /// indented lines. The signing key's is what a Clevis client's
 /// trust-on-first-use prompt and `thp` pin show; the exchange key's is
 /// the `kid` that actually appears in `/rec/<kid>` URLs and server logs.
-fn describe_generation(label: &str, generation: &KeyGeneration) -> String {
+fn describe_generation(label: &str, generation: &KeyGeneration) -> Result<String, String> {
     // created_at's Display impl includes however many subsecond digits
     // the system clock reported, down to nanoseconds; seconds is all a
     // human reading this needs.
     let created_at = generation.created_at.format("%Y-%m-%d %H:%M:%S UTC");
-    format!(
+    Ok(format!(
         "{label}: created {created_at}{}\n  signing thumbprint:  {}\n  exchange thumbprint: {}",
         note_suffix(generation.note.as_deref()),
-        generation.sig.thumbprint(),
-        generation.exc.thumbprint(),
-    )
+        generation.sig.thumbprint().map_err(|e| format!("signing key: {e}"))?,
+        generation.exc.thumbprint().map_err(|e| format!("exchange key: {e}"))?,
+    ))
 }
 
 /// Prints `keys` as pretty JSON to stdout, the common final step of
@@ -196,7 +196,8 @@ fn prune_keys(mut keys: TangKeys, selector: PruneSelector) -> Result<(TangKeys, 
                 .retired
                 .iter()
                 .position(|generation| {
-                    generation.sig.thumbprint() == thumbprint || generation.exc.thumbprint() == thumbprint
+                    generation.sig.thumbprint().is_ok_and(|t| t == thumbprint)
+                        || generation.exc.thumbprint().is_ok_and(|t| t == thumbprint)
                 })
                 .ok_or_else(|| format!("no retired generation found with thumbprint {thumbprint:?}"))?;
             vec![keys.retired.remove(index)]
@@ -232,7 +233,7 @@ fn prune(file: &PathBuf, selector: PruneSelector) -> Result<(), String> {
     let (keys, removed) = prune_keys(keys, selector)?;
     eprintln!("pruned {} retired generation(s):", removed.len());
     for generation in &removed {
-        eprintln!("{}", describe_generation("pruned", generation));
+        eprintln!("{}", describe_generation("pruned", generation)?);
         eprintln!();
     }
     print_json(&keys)
@@ -242,10 +243,10 @@ fn prune(file: &PathBuf, selector: PruneSelector) -> Result<(), String> {
 /// info from `file`, without modifying it.
 fn list(file: &PathBuf) -> Result<(), String> {
     let keys = read_tang_keys(file)?;
-    println!("{}", describe_generation("current", &keys.current));
+    println!("{}", describe_generation("current", &keys.current)?);
     for generation in &keys.retired {
         println!();
-        println!("{}", describe_generation("retired", generation));
+        println!("{}", describe_generation("retired", generation)?);
     }
     Ok(())
 }
@@ -280,20 +281,24 @@ mod tests {
         generation
     }
 
+    /// `key.thumbprint()`, for a key that's already known to be valid
+    /// (every key these tests use is fresh off `test_generation`).
+    fn thumbprint(key: &MyJwkEcKey) -> String { key.thumbprint().expect("a valid key must have a thumbprint") }
+
     #[test]
     fn test_rotate_keys_retires_the_old_current_unchanged_and_mints_a_new_one() {
         let now = chrono::Utc::now();
         let old_current = test_generation(now);
-        let old_current_thumbprint = old_current.exc.thumbprint();
+        let old_current_thumbprint = thumbprint(&old_current.exc);
         let keys = TangKeys { current: old_current, retired: vec![test_generation(now - chrono::Duration::hours(1))] };
 
         let rotated = rotate_keys(keys, Some("rotation note")).expect("rotate must succeed");
 
-        assert_ne!(rotated.current.exc.thumbprint(), old_current_thumbprint, "a fresh key must be generated");
+        assert_ne!(thumbprint(&rotated.current.exc), old_current_thumbprint, "a fresh key must be generated");
         assert_eq!(rotated.current.note.as_deref(), Some("rotation note"));
         assert_eq!(rotated.retired.len(), 2, "the old current must join retired, not replace it");
         assert_eq!(
-            rotated.retired[0].exc.thumbprint(),
+            thumbprint(&rotated.retired[0].exc),
             old_current_thumbprint,
             "the old current must be retired first"
         );
@@ -304,17 +309,17 @@ mod tests {
     fn test_prune_keys_oldest_removes_only_the_single_oldest() {
         let now = chrono::Utc::now();
         let newest = test_generation(now - chrono::Duration::hours(1));
-        let newest_thumbprint = newest.exc.thumbprint();
+        let newest_thumbprint = thumbprint(&newest.exc);
         let oldest = test_generation(now - chrono::Duration::hours(2));
-        let oldest_thumbprint = oldest.exc.thumbprint();
+        let oldest_thumbprint = thumbprint(&oldest.exc);
         let keys = TangKeys { current: test_generation(now), retired: vec![newest, oldest] };
 
         let (pruned_keys, removed) = prune_keys(keys, PruneSelector::Oldest).expect("prune must succeed");
 
         assert_eq!(removed.len(), 1);
-        assert_eq!(removed[0].exc.thumbprint(), oldest_thumbprint, "the removed generation must be reported");
+        assert_eq!(thumbprint(&removed[0].exc), oldest_thumbprint, "the removed generation must be reported");
         assert_eq!(pruned_keys.retired.len(), 1);
-        assert_eq!(pruned_keys.retired[0].exc.thumbprint(), newest_thumbprint);
+        assert_eq!(thumbprint(&pruned_keys.retired[0].exc), newest_thumbprint);
     }
 
     #[test]
@@ -327,7 +332,7 @@ mod tests {
     fn test_prune_keys_keep_keeps_only_the_n_newest() {
         let now = chrono::Utc::now();
         let newest = test_generation(now - chrono::Duration::hours(1));
-        let newest_thumbprint = newest.exc.thumbprint();
+        let newest_thumbprint = thumbprint(&newest.exc);
         let retired = vec![
             newest,
             test_generation(now - chrono::Duration::hours(2)),
@@ -340,7 +345,7 @@ mod tests {
         assert_eq!(removed.len(), 2);
         assert_eq!(pruned_keys.retired.len(), 1);
         assert_eq!(
-            pruned_keys.retired[0].exc.thumbprint(),
+            thumbprint(&pruned_keys.retired[0].exc),
             newest_thumbprint,
             "keep must retain the newest, not the oldest"
         );
@@ -364,36 +369,36 @@ mod tests {
     fn test_prune_keys_older_than_removes_only_generations_past_the_cutoff() {
         let now = chrono::Utc::now();
         let recent = test_generation(now - chrono::Duration::hours(1));
-        let recent_thumbprint = recent.exc.thumbprint();
+        let recent_thumbprint = thumbprint(&recent.exc);
         let stale = test_generation(now - chrono::Duration::days(400));
-        let stale_thumbprint = stale.exc.thumbprint();
+        let stale_thumbprint = thumbprint(&stale.exc);
         let keys = TangKeys { current: test_generation(now), retired: vec![recent, stale] };
 
         let (pruned_keys, removed) =
             prune_keys(keys, PruneSelector::OlderThan(chrono::Duration::days(365))).expect("prune must succeed");
 
         assert_eq!(removed.len(), 1);
-        assert_eq!(removed[0].exc.thumbprint(), stale_thumbprint, "the removed generation must be reported");
+        assert_eq!(thumbprint(&removed[0].exc), stale_thumbprint, "the removed generation must be reported");
         assert_eq!(pruned_keys.retired.len(), 1);
-        assert_eq!(pruned_keys.retired[0].exc.thumbprint(), recent_thumbprint);
+        assert_eq!(thumbprint(&pruned_keys.retired[0].exc), recent_thumbprint);
     }
 
     #[test]
     fn test_prune_keys_thumbprint_removes_only_the_matching_generation() {
         let now = chrono::Utc::now();
         let keep = test_generation(now - chrono::Duration::hours(1));
-        let keep_thumbprint = keep.exc.thumbprint();
+        let keep_thumbprint = thumbprint(&keep.exc);
         let drop = test_generation(now - chrono::Duration::hours(2));
-        let drop_thumbprint = drop.exc.thumbprint();
+        let drop_thumbprint = thumbprint(&drop.exc);
         let keys = TangKeys { current: test_generation(now), retired: vec![keep, drop] };
 
         let (pruned_keys, removed) =
             prune_keys(keys, PruneSelector::Thumbprint(drop_thumbprint.clone())).expect("prune must succeed");
 
         assert_eq!(removed.len(), 1);
-        assert_eq!(removed[0].exc.thumbprint(), drop_thumbprint, "the removed generation must be reported");
+        assert_eq!(thumbprint(&removed[0].exc), drop_thumbprint, "the removed generation must be reported");
         assert_eq!(pruned_keys.retired.len(), 1);
-        assert_eq!(pruned_keys.retired[0].exc.thumbprint(), keep_thumbprint);
+        assert_eq!(thumbprint(&pruned_keys.retired[0].exc), keep_thumbprint);
     }
 
     #[test]
@@ -407,14 +412,14 @@ mod tests {
         let now = chrono::Utc::now();
         let keep = test_generation(now - chrono::Duration::hours(1));
         let drop = test_generation(now - chrono::Duration::hours(2));
-        let drop_sig_thumbprint = drop.sig.thumbprint();
+        let drop_sig_thumbprint = thumbprint(&drop.sig);
         let keys = TangKeys { current: test_generation(now), retired: vec![keep, drop] };
 
         let (pruned_keys, removed) =
             prune_keys(keys, PruneSelector::Thumbprint(drop_sig_thumbprint.clone())).expect("prune must succeed");
 
         assert_eq!(removed.len(), 1);
-        assert_eq!(removed[0].sig.thumbprint(), drop_sig_thumbprint, "the removed generation must be reported");
+        assert_eq!(thumbprint(&removed[0].sig), drop_sig_thumbprint, "the removed generation must be reported");
         assert_eq!(pruned_keys.retired.len(), 1);
     }
 
