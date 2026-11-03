@@ -2,7 +2,7 @@ use futures_util::StreamExt;
 use http::StatusCode;
 use worker::*;
 
-use crate::access_control::authorized;
+use crate::access_control::{allowlist_present, authorized, health_rate_limit_ok};
 use crate::keys::{CoSigner, TangKeys};
 
 mod content_types {
@@ -48,6 +48,23 @@ fn content_type_headers(value: &str) -> Headers {
 /// be reachable; handled rather than assumed in case that ever changes.
 fn is_tangy_not_found(e: &tangy_lib::Error) -> bool {
     matches!(e, tangy_lib::Error::KeyNotFound { .. } | tangy_lib::Error::ForbiddenOperation { .. })
+}
+
+/// Handles `GET /health`: confirms `TANG_KEYS` and `ALLOWED_CIDRS_KV` are
+/// both present and well-formed, without `authorized`'s IP allowlist
+/// check (this is reachable from anywhere) or the real cost of
+/// `TangKeys::validate`'s per-key ECDSA checks. Still shares
+/// `authorized`'s rate limit, via `health_rate_limit_ok`, so the KV read
+/// below can't be hammered for free the way the allowlist bypass would
+/// otherwise allow.
+pub(crate) async fn handle_health(req: Request, ctx: RouteContext<()>) -> Result<Response> {
+    if !health_rate_limit_ok(&req, &ctx.env).await {
+        return error_response(StatusCode::TOO_MANY_REQUESTS);
+    }
+    if TangKeys::load_from_env(&ctx.env).is_err() || allowlist_present(&ctx.env).await.is_err() {
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    Response::ok("OK")
 }
 
 /// Handles `GET /adv`, `/adv/`, and `/adv/:thp`. See "`/adv/<thp>` and key

@@ -54,6 +54,14 @@ of CIDRs from which requests are expected to be made. If an attacker can
 make a request from one of these addresses, then NBDE will provide no
 protection.
 
+`GET /health` is the one exception to this: it's reachable from any IP,
+by design, so uptime monitoring doesn't need to be allowlisted too. It
+confirms the Worker's configuration loads (`TANG_KEYS`,
+`ALLOWED_CIDRS_KV`), but reveals nothing about its contents and performs
+no cryptographic operation. It still shares `/adv` and `/rec`'s per-IP
+rate limit, so it can't be used to repeatedly force the `ALLOWED_CIDRS_KV`
+read for free.
+
 ## Required configuration
 
 In order to deploy, two pieces of information are needed:

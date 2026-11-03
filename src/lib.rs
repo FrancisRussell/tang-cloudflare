@@ -36,6 +36,7 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let rec_pattern = format!("/rec/:{}", handlers::KID_PARAM);
     let adv_thp_pattern = format!("/adv/:{}", handlers::THP_PARAM);
     Router::new()
+        .get_async("/health", handlers::handle_health)
         .get_async("/adv", handlers::handle_adv)
         .get_async("/adv/", handlers::handle_adv)
         .get_async(&adv_thp_pattern, handlers::handle_adv)

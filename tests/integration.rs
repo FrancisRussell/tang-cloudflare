@@ -538,6 +538,14 @@ fn scenario_adv_thp_unknown_is_not_found(dev: &WranglerDev) {
     assert_eq!(result.status, StatusCode::NOT_FOUND, "body: {}", result.body);
 }
 
+/// Asserts `GET /health` succeeds with no `CF-Connecting-IP` at all,
+/// unlike every other endpoint: it's meant to be reachable regardless of
+/// the allowlist.
+fn scenario_health_check_succeeds_with_no_client_ip(dev: &WranglerDev) {
+    let result = get_path(dev, "/health", None);
+    assert_eq!(result.status, StatusCode::OK, "body: {}", result.body);
+}
+
 /// Asserts `/adv` is forbidden for an IP outside the allowlist.
 fn scenario_adv_disallowed_ip_is_forbidden(dev: &WranglerDev) {
     let result = get_adv(dev, Some(DISALLOWED_IP));
@@ -617,6 +625,8 @@ fn integration_test() {
 
     let (tang_keys, retired_sig_thp) = generate_test_tang_keys();
     let dev = WranglerDev::start(&tang_keys);
+
+    scenario_health_check_succeeds_with_no_client_ip(&dev);
 
     scenario_adv_disallowed_ip_is_forbidden(&dev);
     scenario_adv_missing_ip_is_forbidden(&dev);

@@ -80,28 +80,55 @@ fn ip_allowed(req: &Request, allowed: &AllowList) -> bool {
     allowed.allows(ip)
 }
 
-/// True if `req`'s source IP is still within `RATE_LIMIT_BINDING`'s
-/// per-IP cap. Checked before the KV read in `authorized`, so a source
-/// hammering the Worker doesn't keep paying for it. Fails closed on a
-/// missing IP, same as `ip_allowed`; fails open on the binding itself
-/// being unreachable, since a rate-limiter hiccup shouldn't take down
-/// the real access check that follows it.
-async fn rate_limit_ok(req: &Request, env: &Env) -> bool {
-    let Some(ip) = get_client_ip(req) else { return false };
+/// Checks `ip` (if any) against `RATE_LIMIT_BINDING`'s per-IP cap, so a
+/// source hammering the Worker doesn't keep paying for whatever follows.
+/// Fails open on the binding itself being unreachable, since a
+/// rate-limiter hiccup shouldn't take down the real check that follows
+/// it; `without_ip` is the caller's own choice for when there's no `ip`
+/// to check at all.
+async fn rate_limit_ok(ip: Option<String>, env: &Env, without_ip: bool) -> bool {
+    let Some(ip) = ip else { return without_ip };
     let Ok(limiter) = env.rate_limiter(RATE_LIMIT_BINDING) else { return true };
     limiter.limit(ip).await.map_or(true, |outcome| outcome.success)
 }
 
 /// True if `req` is allowed to reach `/adv` or `/rec`: within the per-IP
-/// rate limit, and in the CIDR list in `ALLOWED_CIDRS_KV`.
+/// rate limit, and in the CIDR list in `ALLOWED_CIDRS_KV`. Fails closed on
+/// a missing IP, same as `ip_allowed`: there's no allowlist entry a
+/// requester with no IP at all could ever match anyway.
 pub(crate) async fn authorized(req: &Request, env: &Env) -> bool {
-    if !rate_limit_ok(req, env).await {
+    if !rate_limit_ok(get_client_ip(req), env, false).await {
         return false;
     }
-    let Ok(kv) = env.kv(ALLOWED_CIDRS_KV_BINDING) else { return false };
-    let Ok(Some(raw)) = kv.get(ALLOWED_CIDRS_KV_KEY).text().await else { return false };
+    let Ok(Some(raw)) = read_allowlist_kv(env).await else { return false };
     let Ok(allowed) = raw.parse::<AllowList>() else { return false };
     ip_allowed(req, &allowed)
+}
+
+/// True if `req`'s source IP (if any) is still within `/health`'s share of
+/// the same per-IP rate limit `authorized` uses, protecting `/health`'s
+/// own `ALLOWED_CIDRS_KV` read the same way. Unlike `authorized`, a
+/// missing IP passes rather than fails: `/health` has to stay reachable
+/// without one by design (see `handlers::handle_health`), and there's
+/// nothing to key a limiter on in that case anyway.
+pub(crate) async fn health_rate_limit_ok(req: &Request, env: &Env) -> bool {
+    rate_limit_ok(get_client_ip(req), env, true).await
+}
+
+/// Reads `ALLOWED_CIDRS_KV`'s raw value, or `Ok(None)` if the binding has
+/// no value set yet.
+async fn read_allowlist_kv(env: &Env) -> Result<Option<String>, ()> {
+    let kv = env.kv(ALLOWED_CIDRS_KV_BINDING).map_err(|_| ())?;
+    kv.get(ALLOWED_CIDRS_KV_KEY).text().await.map_err(|_| ())
+}
+
+/// `/health`'s check on `ALLOWED_CIDRS_KV`: present and parses as a valid
+/// `AllowList`, without `authorized`'s rate limit or per-request IP
+/// check.
+pub(crate) async fn allowlist_present(env: &Env) -> Result<(), ()> {
+    let raw = read_allowlist_kv(env).await?.ok_or(())?;
+    raw.parse::<AllowList>().map_err(|_| ())?;
+    Ok(())
 }
 
 #[cfg(test)]
