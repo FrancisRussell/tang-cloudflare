@@ -35,7 +35,7 @@ use sha2::{Digest, Sha256};
 const PROJECT_DIR: &str = env!("CARGO_MANIFEST_DIR");
 /// The `worker-build` version to install, matching wrangler.toml's build
 /// command.
-const WORKER_BUILD_CRATE: &str = "worker-build@0.8.6";
+const WORKER_BUILD_CRATE: &str = "worker-build@0.9.0";
 const READY_TIMEOUT: Duration = Duration::from_secs(45);
 /// Per-request timeout for every HTTP call this test makes, so a hung
 /// request fails with a clear error instead of hanging the whole test.

@@ -15,7 +15,7 @@ preview_urls = false
 # releases. --no-default-features drops the "cli" feature, which pulls in
 # clap/humantime for the keygen binary; that binary is never part of this
 # build, so there's no reason to compile its dependencies here.
-command = "cargo install -q --locked worker-build@0.8.6 && worker-build --release --no-default-features"
+command = "cargo install -q --locked worker-build@0.9.0 && worker-build --release --no-default-features"
 
 # A placeholder: `scripts/deploy.sh` substitutes the real namespace id
 # into a generated copy (see wrangler.generated.toml, gitignored) rather

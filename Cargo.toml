@@ -22,7 +22,7 @@ ipnetwork = { version = "0.21", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1", default-features = false, features = ["std"] }
 tangy-lib = "1"
-worker = { version = "0.8", default-features = false }
+worker = { version = "0.9", default-features = false }
 
 # tangy-lib's own getrandom dependency requests no wasm backend; this
 # supplies one via feature unification, scoped away from WASI (which
