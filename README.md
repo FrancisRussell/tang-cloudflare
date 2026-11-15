@@ -90,7 +90,7 @@ that is fully independent of Tang.
 
 - A Cloudflare account
 - Node.js/npm (for `wrangler`, Cloudflare's deployment tool), a Rust
-  toolchain, and `jq`
+  toolchain, `jq`, and `curl`
 - The machines this Worker will unlock, and their IPs.
 
 ### 2. Install dependencies
@@ -205,10 +205,12 @@ value back, if you ever need to check it.
 npm run deploy
 ```
 
-The URL of the worker will be printed during this step. `wrangler.toml`
-also declares a per-IP rate limit (60 requests/minute), applied as part of
-this deploy; it's more a protection against a buggy client than a DOS
-attack, since a client could still consume significant request budget.
+The URL of the worker will be printed during this step, followed by a
+check that `GET /health` is up on it, retrying for a few seconds in case
+the deploy hasn't finished propagating yet. `wrangler.toml` also declares
+a per-IP rate limit (60 requests/minute), applied as part of this deploy;
+it's more a protection against a buggy client than a DOS attack, since a
+client could still consume significant request budget.
 
 ### 6. Verify it's working
 
